@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FastCuller</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Oswald&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- ── Folder picker ── -->
+<div id="screen-picker">
+  <div id="picker-title">FastCuller</div>
+  <div id="picker-sub">Select a folder of CR3 files to cull</div>
+  <button id="btn-pick" onclick="pickFolder()">Select Folder</button>
+  <div id="picker-error"></div>
+</div>
+
+<!-- ── Header ── -->
+<div id="header">
+  <div id="header-left">
+    <div id="filename"></div>
+    <div id="progress"></div>
+    <div id="rating-summary"></div>
+  </div>
+  <div id="key-hints">
+    <div class="key-hint"><span class="key-badge">1–5</span> rate &amp; next</div>
+    <div class="key-hint"><span class="key-badge">← →</span> navigate</div>
+    <div class="key-hint"><span class="key-badge">?</span> shortcuts</div>
+  </div>
+  <div id="header-right">
+    <button class="btn-secondary" onclick="showPicker()">Change Folder</button>
+    <button class="btn-primary" id="btn-copy" onclick="openCopyModal()" disabled>Copy Photos</button>
+  </div>
+</div>
+
+<!-- ── Main image panel ── -->
+<div id="main-panel">
+  <img id="main-img" src="" alt="" draggable="false">
+  <div id="overlay">
+    <div class="spinner"></div>
+    <div id="overlay-title">Loading...</div>
+    <div id="overlay-sub"></div>
+  </div>
+  <div id="exif-bar"></div>
+</div>
+
+<!-- ── Filmstrip ── -->
+<div id="filmstrip-wrap">
+  <div id="filmstrip"></div>
+</div>
+
+<!-- ── Copy modal ── -->
+<div id="copy-modal-backdrop" class="hidden">
+  <div id="copy-modal">
+    <div id="copy-modal-title">Copy Photos</div>
+    <div class="modal-row">
+      <span class="modal-label">Copy:</span>
+      <select id="copy-rating-select" onchange="updateCopyCount()">
+        <option value="1">1 star and above &#9733;</option>
+        <option value="2">2 stars and above &#9733;&#9733;</option>
+        <option value="3">3 stars and above &#9733;&#9733;&#9733;</option>
+        <option value="4">4 stars and above &#9733;&#9733;&#9733;&#9733;</option>
+        <option value="5">5 stars &#9733;&#9733;&#9733;&#9733;&#9733;</option>
+        <option value="-1">All photos</option>
+        <option value="0">Unrated only</option>
+      </select>
+      <span id="copy-count" class="copy-count-badge"></span>
+    </div>
+    <div class="modal-row">
+      <span class="modal-label">To:</span>
+      <span id="copy-dest-path">No folder selected</span>
+      <button class="btn-secondary" onclick="pickDestination()">Browse</button>
+    </div>
+    <div id="copy-progress-bar" style="display:none">
+      <div id="copy-progress-bar-fill"></div>
+    </div>
+    <div id="copy-modal-status"></div>
+    <div class="modal-buttons">
+      <button class="btn-secondary" onclick="closeCopyModal()">Cancel</button>
+      <button class="btn-primary" id="btn-copy-go" onclick="doCopy()" disabled>Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Help modal ── -->
+<div id="help-modal-backdrop" class="hidden">
+  <div id="help-modal">
+    <div id="help-modal-title">Keyboard Shortcuts</div>
+    <table id="help-table">
+      <tbody>
+        <tr><td class="key-cell"><kbd>1</kbd> – <kbd>5</kbd></td><td>Rate N stars and advance to next</td></tr>
+        <tr><td class="key-cell"><kbd>`</kbd></td><td>Rate 0 stars and advance to next</td></tr>
+        <tr><td class="key-cell"><kbd>Shift</kbd> + <kbd>1</kbd>–<kbd>5</kbd></td><td>Rate N stars without advancing</td></tr>
+        <tr><td class="key-cell"><kbd>Shift</kbd> + <kbd>`</kbd></td><td>Rate 0 stars without advancing</td></tr>
+        <tr><td class="key-cell"><kbd>&#8592;</kbd> / <kbd>&#8594;</kbd></td><td>Navigate previous / next</td></tr>
+        <tr><td class="key-cell"><kbd>&#8592;</kbd> + <kbd>1</kbd></td><td>Jump to previous 1-star photo</td></tr>
+        <tr><td class="key-cell"><kbd>&#8594;</kbd> + <kbd>1</kbd></td><td>Jump to next 1-star photo</td></tr>
+        <tr><td class="key-cell"><kbd>&#8592;</kbd> + <kbd>`</kbd></td><td>Jump to previous 0-star photo</td></tr>
+        <tr><td class="key-cell"><kbd>&#8594;</kbd> + <kbd>`</kbd></td><td>Jump to next 0-star photo</td></tr>
+        <tr><td class="key-cell"><kbd>Home</kbd></td><td>Jump to first unrated photo</td></tr>
+        <tr><td class="key-cell"><kbd>End</kbd></td><td>Jump to last unrated photo</td></tr>
+        <tr><td class="key-cell"><kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>Undo last rating</td></tr>
+        <tr><td class="key-cell"><kbd>?</kbd></td><td>Toggle this help</td></tr>
+        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals</td></tr>
+      </tbody>
+    </table>
+    <div class="modal-buttons">
+      <button class="btn-secondary" onclick="closeHelpModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast notification ── -->
+<div id="toast"></div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+
+  let _state = null;
+  let _currentIdx = 0;
+  let _total = 0;
+  let _ratings = [];          // array of ratings per photo (0 = unrated/0-star)
+  let _prefetchReady = [];    // indices with image cached server-side
+  let _copyDest = null;
+  let _es = null;
+  let _sessionActive = false;
+  let _hasShownImage = false;
+  let _folderPath = null;     // current folder path, used for localStorage key
+  let _sessionVer = 0;        // incremented each time a new folder is loaded; busts URL caches
+
+  // Browser-side image preload cache: idx → Image object.
+  // Holding a reference keeps the browser's decoded image in memory so display is instant.
+  const _preloadMap = new Map();
+  const PRELOAD_AHEAD = 3;
+
+  function preloadAhead(fromIdx) {
+    // Evict entries outside the current window to free memory
+    for (const k of _preloadMap.keys()) {
+      if (k <= fromIdx || k > fromIdx + PRELOAD_AHEAD) _preloadMap.delete(k);
+    }
+    for (let i = 1; i <= PRELOAD_AHEAD; i++) {
+      const idx = fromIdx + i;
+      if (idx < _total && !_preloadMap.has(idx)) {
+        const pre = new Image();
+        pre.src = `/api/image/${idx}?v=${_sessionVer}`;
+        _preloadMap.set(idx, pre);
+      }
+    }
+  }
+
+  // Undo history: stack of { idx, prevRating }
+  const _ratingHistory = [];
+  const UNDO_MAX = 20;
+  let _suppressHistory = false;
+
+  const THUMB_CACHE_MAX = {{ thumb_cache_max }};
+
+  // ── SSE ────────────────────────────────────────────────────────────────────
+
+  let _sseReconnectTimer = null;
+
+  function connectSSE() {
+    if (_es) { _es.close(); _es = null; }
+    _es = new EventSource('/api/events');
+    _es.onmessage = (e) => {
+      clearTimeout(_sseReconnectTimer);
+      try { handleServerState(JSON.parse(e.data)); } catch (_) {}
+    };
+    _es.onerror = () => {
+      _es.close();
+      _es = null;
+      // Reconnect after 3 s
+      _sseReconnectTimer = setTimeout(connectSSE, 3000);
+    };
+  }
+
+  function handleServerState(data) {
+    if (data.status === 'error') {
+      showPicker();
+      document.getElementById('picker-error').textContent = data.message;
+      return;
+    }
+    if (data.status === 'starting') {
+      showOverlay('Loading...', data.stage || '');
+      return;
+    }
+    if (data.status === 'waiting') {
+      return;
+    }
+    if (data.status === 'ready') {
+      _state = data;
+      _total = data.total;
+      _ratings = data.ratings || [];
+      _prefetchReady = data.prefetch_ready || [];
+      updatePrefetchIndicators();
+
+      if (!_sessionActive) {
+        _sessionActive = true;
+        document.getElementById('btn-copy').disabled = false;
+        buildFilmstrip(data.total);
+
+        // Restore saved position for this folder
+        let startIdx = data.current_idx;
+        if (_folderPath) {
+          const saved = localStorage.getItem('fastculler:pos:' + _folderPath);
+          if (saved !== null) {
+            const savedIdx = parseInt(saved, 10);
+            if (!isNaN(savedIdx) && savedIdx > 0 && savedIdx < data.total) {
+              startIdx = savedIdx;
+              // Tell server about the restored position
+              fetch('/api/navigate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({idx: startIdx}),
+              });
+            }
+          }
+        }
+        setCurrentIdx(startIdx, true);
+      } else {
+        // During an active session the client is authoritative for position —
+        // don't let a stale SSE packet (server hasn't yet seen the user's click)
+        // override the optimistic navigation that already happened client-side.
+        renderRatingSummary();
+        refreshFilmstripRatings();
+      }
+    }
+  }
+
+  // ── Folder picker ──────────────────────────────────────────────────────────
+
+  async function pickFolder() {
+    document.getElementById('btn-pick').disabled = true;
+    document.getElementById('picker-error').textContent = '';
+
+    const res = await fetch('/api/pick-folder');
+    const data = await res.json();
+    if (!data.path) {
+      document.getElementById('btn-pick').disabled = false;
+      return;
+    }
+    await startWithPath(data.path);
+  }
+
+  async function startWithPath(path) {
+    document.getElementById('btn-pick').disabled = true;
+    document.getElementById('picker-sub').textContent = 'Loading...';
+    document.getElementById('picker-error').textContent = '';
+    document.getElementById('screen-picker').classList.add('hidden');
+
+    _folderPath = path;
+    _sessionVer++;
+    _preloadMap.clear();
+    _sessionActive = false;
+    _hasShownImage = false;
+    _state = null;
+    _ratings = [];
+    _ratingHistory.length = 0;
+    document.getElementById('btn-copy').disabled = true;
+    document.getElementById('filmstrip').innerHTML = '';
+    document.getElementById('exif-bar').innerHTML = '';
+
+    showOverlay('Scanning folder...');
+    await fetch('/api/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path}),
+    });
+    connectSSE();
+  }
+
+  function showPicker() {
+    if (_es) { _es.close(); _es = null; }
+    clearTimeout(_sseReconnectTimer);
+    _sessionActive = false;
+    _hasShownImage = false;
+    document.getElementById('screen-picker').classList.remove('hidden');
+    document.getElementById('btn-pick').disabled = false;
+    document.getElementById('picker-sub').textContent = 'Select a folder of CR3 files to cull';
+    document.getElementById('picker-error').textContent = '';
+    hideOverlay();
+  }
+
+  function showOverlay(title, sub) {
+    const overlay = document.getElementById('overlay');
+    overlay.classList.remove('hidden');
+    document.getElementById('overlay-title').textContent = title || 'Loading...';
+    document.getElementById('overlay-sub').textContent = sub || '';
+    overlay.querySelector('.spinner').style.display = '';
+  }
+
+  function hideOverlay() {
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  // ── Image display ──────────────────────────────────────────────────────────
+
+  let _loadingIdx = null;
+
+  function setCurrentIdx(idx, forceImageLoad) {
+    const prevIdx = _currentIdx;
+    _currentIdx = idx;
+
+    // Persist position for this folder
+    if (_folderPath) {
+      localStorage.setItem('fastculler:pos:' + _folderPath, idx);
+    }
+
+    const path = _state ? _state.filename : '';
+    document.getElementById('filename').textContent = path;
+    document.getElementById('progress').textContent = _total > 0 ? `${idx + 1} / ${_total}` : '';
+    renderRatingSummary();
+
+    fetchExif(idx);
+    updateFilmstripCurrent(idx);
+    centreFilmstripOn(idx);
+    refreshFilmstripRatings();
+    preloadAhead(idx);
+
+    if (forceImageLoad || prevIdx !== idx) {
+      loadMainImage(idx);
+    }
+  }
+
+  function loadMainImage(idx) {
+    _loadingIdx = idx;
+    const img = document.getElementById('main-img');
+    if (img.getAttribute('data-idx') == idx) {
+      return;
+    }
+    if (!_hasShownImage) {
+      showOverlay('Loading...');
+    }
+    const tmp = new Image();
+    tmp.onload = () => {
+      if (_loadingIdx !== idx) return;
+      img.src = tmp.src;
+      img.setAttribute('data-idx', idx);
+      if (!_hasShownImage) {
+        _hasShownImage = true;
+        hideOverlay();
+      }
+    };
+    tmp.onerror = () => {
+      if (_loadingIdx !== idx) return;
+      if (!_hasShownImage) hideOverlay();
+    };
+    tmp.src = `/api/image/${idx}?v=${_sessionVer}`;
+  }
+
+  function renderRatingSummary() {
+    if (!_total) return;
+    const counts = {};
+    for (let i = 0; i < _total; i++) {
+      const r = _ratings[i] || 0;
+      counts[r] = (counts[r] || 0) + 1;
+    }
+    const parts = [];
+    for (let r = 5; r >= 1; r--) {
+      if (counts[r]) parts.push(`<span class="star-filled">${'★'.repeat(r)}</span>&thinsp;${counts[r]}`);
+    }
+    const unrated = counts[0] || 0;
+    if (unrated > 0) parts.push(`<span class="star-empty">☆</span>&thinsp;${unrated}`);
+    document.getElementById('rating-summary').innerHTML = parts.join('&ensp;');
+  }
+
+  // ── EXIF overlay ───────────────────────────────────────────────────────────
+
+  let _exifController = null;
+
+  async function fetchExif(idx) {
+    if (_exifController) _exifController.abort();
+    _exifController = new AbortController();
+    const bar = document.getElementById('exif-bar');
+    try {
+      const res = await fetch(`/api/exif/${idx}?v=${_sessionVer}`, { signal: _exifController.signal });
+      if (!res.ok) { bar.innerHTML = ''; return; }
+      const data = await res.json();
+      if (_currentIdx !== idx) return;
+      const rows = [data.iso, data.shutter, data.aperture, data.focal_length].filter(Boolean);
+      let html = rows.map(v => `<div class="exif-row">${v}</div>`).join('');
+      if (data.lens) html += `<div class="exif-row exif-lens">${data.lens}</div>`;
+      if (data.datetime) html += `<div class="exif-row exif-lens">${data.datetime}</div>`;
+      bar.innerHTML = html;
+    } catch (e) {
+      if (e.name !== 'AbortError') bar.innerHTML = '';
+    }
+  }
+
+  // ── Keyboard handling ──────────────────────────────────────────────────────
+
+  const _held = { left: false, right: false };
+
+  document.addEventListener('keydown', (e) => {
+    if (!_sessionActive) return;
+
+    // Help modal takes priority
+    if (document.querySelector('#help-modal-backdrop:not(.hidden)')) {
+      if (e.key === 'Escape' || e.key === '?') { closeHelpModal(); e.preventDefault(); }
+      return;
+    }
+
+    // Copy modal: Escape to close
+    if (document.querySelector('#copy-modal-backdrop:not(.hidden)')) {
+      if (e.key === 'Escape') closeCopyModal();
+      return;
+    }
+
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+    // Undo (Cmd+Z / Ctrl+Z)
+    if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+      e.preventDefault();
+      undoLastRating();
+      return;
+    }
+
+    if (e.key === 'ArrowLeft')  { _held.left = true;  e.preventDefault(); }
+    if (e.key === 'ArrowRight') { _held.right = true; e.preventDefault(); }
+
+    if (e.key === '?') { openHelpModal(); e.preventDefault(); return; }
+
+    if (e.key === 'Home') {
+      e.preventDefault();
+      const idx = _ratings.findIndex((r, i) => i < _total && !r);
+      if (idx >= 0) navigate(idx);
+      return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      let idx = -1;
+      for (let i = _total - 1; i >= 0; i--) {
+        if (!_ratings[i]) { idx = i; break; }
+      }
+      if (idx >= 0) navigate(idx);
+      return;
+    }
+
+    // Rating keys 1–5 (physical key, independent of Shift)
+    const digitMap = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
+    if (e.code in digitMap) {
+      const rating = digitMap[e.code];
+      e.preventDefault();
+      if (e.shiftKey)       rateOnly(_currentIdx, rating);
+      else if (_held.left)  navigateByRating(-1, rating);
+      else if (_held.right) navigateByRating(1, rating);
+      else                  rateAndAdvance(_currentIdx, rating);
+    }
+
+    // Backtick = 0 stars
+    if (e.code === 'Backquote') {
+      e.preventDefault();
+      if (e.shiftKey)       rateOnly(_currentIdx, 0);
+      else if (_held.left)  navigateByRating(-1, 0);
+      else if (_held.right) navigateByRating(1, 0);
+      else                  rateAndAdvance(_currentIdx, 0);
+    }
+
+    if (e.key === 'ArrowLeft'  && !_held.right) navigate(_currentIdx - 1);
+    if (e.key === 'ArrowRight' && !_held.left)  navigate(_currentIdx + 1);
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft')  _held.left  = false;
+    if (e.key === 'ArrowRight') _held.right = false;
+  });
+
+  // ── Navigation & rating API calls ──────────────────────────────────────────
+
+  async function navigate(idx) {
+    if (idx < 0 || idx >= _total) return;
+    setCurrentIdx(idx, true);
+    await fetch('/api/navigate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({idx}),
+    });
+  }
+
+  async function rateAndAdvance(idx, rating) {
+    if (!_suppressHistory) {
+      _ratingHistory.push({ idx, prevRating: _ratings[idx] || 0 });
+      if (_ratingHistory.length > UNDO_MAX) _ratingHistory.shift();
+    }
+    _ratings[idx] = rating;
+    renderRatingSummary();
+    updateThumbStars(idx);
+    const nextIdx = Math.min(idx + 1, _total - 1);
+    setCurrentIdx(nextIdx, true);
+
+    const res = await fetch('/api/rate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({idx, rating, advance: true}),
+    });
+    const data = await res.json();
+    if (data.warning) showToast(`XMP error: ${data.warning}`);
+  }
+
+  async function rateOnly(idx, rating) {
+    if (!_suppressHistory) {
+      _ratingHistory.push({ idx, prevRating: _ratings[idx] || 0 });
+      if (_ratingHistory.length > UNDO_MAX) _ratingHistory.shift();
+    }
+    _ratings[idx] = rating;
+    renderRatingSummary();
+    updateThumbStars(idx);
+
+    const res = await fetch('/api/rate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({idx, rating, advance: false}),
+    });
+    const data = await res.json();
+    if (data.warning) showToast(`XMP error: ${data.warning}`);
+  }
+
+  async function undoLastRating() {
+    if (!_ratingHistory.length) { showToast('Nothing to undo'); return; }
+    const { idx, prevRating } = _ratingHistory.pop();
+    _suppressHistory = true;
+    await rateOnly(idx, prevRating);
+    _suppressHistory = false;
+    const label = prevRating ? `${prevRating}★` : 'unrated';
+    showToast(`Undo: photo ${idx + 1} → ${label}`);
+  }
+
+  async function navigateByRating(direction, rating) {
+    const res = await fetch('/api/navigate-by-rating', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rating, direction}),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      setCurrentIdx(data.idx, true);
+    } else {
+      const ratingStr = rating === 0 ? '0-star' : `${rating}-star`;
+      showToast(`No ${ratingStr} photo ${direction > 0 ? 'ahead' : 'behind'}`);
+    }
+  }
+
+  // ── Filmstrip ──────────────────────────────────────────────────────────────
+
+  const _thumbLoaded = new Set();
+  let _filmstripReady = false;  // false until the first centreFilmstripOn of a session
+  let _thumbScrollTimer = null;
+
+  function buildFilmstrip(total) {
+    _filmstripReady = false;
+    const strip = document.getElementById('filmstrip');
+    strip.innerHTML = '';
+    _thumbLoaded.clear();
+
+    for (let i = 0; i < total; i++) {
+      const item = document.createElement('div');
+      item.className = 'thumb-item';
+      item.dataset.idx = i;
+
+      const placeholder = document.createElement('div');
+      placeholder.className = 'thumb-placeholder';
+      placeholder.textContent = i + 1;
+      item.appendChild(placeholder);
+
+      const stars = document.createElement('div');
+      stars.className = 'thumb-stars';
+      stars.id = `thumb-stars-${i}`;
+      item.appendChild(stars);
+
+      item.addEventListener('click', () => navigate(i));
+      strip.appendChild(item);
+    }
+  }
+
+  function loadVisibleThumbnails() {
+    const strip = document.getElementById('filmstrip');
+    const margin = 300;
+    const left = strip.scrollLeft - margin;
+    const right = strip.scrollLeft + strip.offsetWidth + margin;
+    strip.querySelectorAll('.thumb-item').forEach(el => {
+      if (_thumbLoaded.has(parseInt(el.dataset.idx, 10))) return;
+      if (el.offsetLeft + el.offsetWidth >= left && el.offsetLeft <= right) {
+        loadThumb(parseInt(el.dataset.idx, 10), el);
+      }
+    });
+  }
+
+  // Scroll listener: runs loadVisibleThumbnails once the strip has settled.
+  // Layout shifts from thumbnails loading do NOT trigger this — only user scroll does.
+  document.getElementById('filmstrip').addEventListener('scroll', () => {
+    clearTimeout(_thumbScrollTimer);
+    _thumbScrollTimer = setTimeout(loadVisibleThumbnails, 80);
+  }, { passive: true });
+
+  function loadThumb(idx, item) {
+    _thumbLoaded.add(idx);
+    const img = document.createElement('img');
+    img.alt = '';
+    img.onload = () => {
+      const placeholder = item.querySelector('.thumb-placeholder');
+      if (placeholder) placeholder.replaceWith(img);
+    };
+    img.src = `/api/thumbnail/${idx}?v=${_sessionVer}`;
+  }
+
+  function updateFilmstripCurrent(idx) {
+    document.querySelectorAll('.thumb-item.current').forEach(el => el.classList.remove('current'));
+    const el = document.querySelector(`.thumb-item[data-idx="${idx}"]`);
+    if (el) el.classList.add('current');
+  }
+
+  function centreFilmstripOn(idx) {
+    const el = document.querySelector(`.thumb-item[data-idx="${idx}"]`);
+    if (!el) return;
+    const strip = document.getElementById('filmstrip');
+    const stripRect = strip.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const offset = elRect.left - stripRect.left + strip.scrollLeft - stripRect.width / 2 + elRect.width / 2;
+    if (_filmstripReady) {
+      strip.scrollTo({ left: offset, behavior: 'smooth' });
+    } else {
+      // Jump instantly on initial load so only the thumbnails at the final
+      // scroll position are loaded, not every photo scrolled past.
+      strip.scrollLeft = offset;
+      _filmstripReady = true;
+      loadVisibleThumbnails();
+    }
+  }
+
+  function refreshFilmstripRatings() {
+    for (let i = 0; i < _ratings.length; i++) updateThumbStars(i);
+  }
+
+  function updateThumbStars(idx) {
+    const el = document.getElementById(`thumb-stars-${idx}`);
+    if (!el) return;
+    const r = _ratings[idx] || 0;
+    el.textContent = r >= 1 ? '★'.repeat(r) : '';
+  }
+
+  function updatePrefetchIndicators() {
+    const ready = new Set(_prefetchReady);
+    document.querySelectorAll('.thumb-item').forEach(el => {
+      el.classList.toggle('prefetched', ready.has(parseInt(el.dataset.idx, 10)));
+    });
+  }
+
+  // ── Copy photos modal ──────────────────────────────────────────────────────
+
+  function updateCopyCount() {
+    const rating = parseInt(document.getElementById('copy-rating-select').value, 10);
+    const count = rating === -1
+      ? _total
+      : rating === 0
+        ? _ratings.filter((r, i) => i < _total && (r || 0) === 0).length
+        : _ratings.filter((r, i) => i < _total && (r || 0) >= rating).length;
+    document.getElementById('copy-count').textContent = `${count} photo${count !== 1 ? 's' : ''}`;
+  }
+
+  function openCopyModal() {
+    _copyDest = null;
+    document.getElementById('copy-dest-path').textContent = 'No folder selected';
+    document.getElementById('copy-modal-status').textContent = '';
+    document.getElementById('copy-progress-bar').style.display = 'none';
+    document.getElementById('copy-progress-bar-fill').style.width = '0%';
+    document.getElementById('btn-copy-go').disabled = true;
+    updateCopyCount();
+    document.getElementById('copy-modal-backdrop').classList.remove('hidden');
+  }
+
+  function closeCopyModal() {
+    document.getElementById('copy-modal-backdrop').classList.add('hidden');
+  }
+
+  async function pickDestination() {
+    const res = await fetch('/api/pick-destination');
+    const data = await res.json();
+    if (data.path) {
+      _copyDest = data.path;
+      document.getElementById('copy-dest-path').textContent = data.path;
+      document.getElementById('btn-copy-go').disabled = false;
+    }
+  }
+
+  async function doCopy() {
+    if (!_copyDest) return;
+    const rating = parseInt(document.getElementById('copy-rating-select').value, 10);
+    const statusEl = document.getElementById('copy-modal-status');
+    const progressEl = document.getElementById('copy-progress-bar-fill');
+    statusEl.textContent = 'Starting...';
+    progressEl.style.width = '0%';
+    document.getElementById('copy-progress-bar').style.display = '';
+    document.getElementById('btn-copy-go').disabled = true;
+
+    let lastData = null;
+    try {
+      const res = await fetch('/api/copy', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({rating, destination: _copyDest}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const data = JSON.parse(line);
+          lastData = data;
+          const pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
+          progressEl.style.width = pct + '%';
+          statusEl.textContent =
+            `Copying ${data.progress} / ${data.total}` +
+            (data.skipped ? ` (${data.skipped} skipped)` : '') +
+            (data.errors.length ? ` (${data.errors.length} error${data.errors.length > 1 ? 's' : ''})` : '');
+        }
+      }
+    } catch (e) {
+      document.getElementById('copy-progress-bar').style.display = 'none';
+      statusEl.textContent = e.message || 'Copy failed.';
+      document.getElementById('btn-copy-go').disabled = false;
+      return;
+    }
+
+    document.getElementById('copy-progress-bar').style.display = 'none';
+    if (lastData && lastData.ok) {
+      const parts = [`Copied ${lastData.copied} file${lastData.copied !== 1 ? 's' : ''}`];
+      if (lastData.skipped) parts.push(`${lastData.skipped} skipped (already exist)`);
+      if (lastData.errors.length) parts.push(`${lastData.errors.length} error(s)`);
+      const msg = parts.join(', ') + '.';
+      statusEl.textContent = msg;
+      if (!lastData.errors.length && !lastData.skipped) {
+        setTimeout(() => { closeCopyModal(); showToast(msg); }, 1500);
+      } else {
+        document.getElementById('btn-copy-go').disabled = false;
+      }
+    } else {
+      statusEl.textContent = 'Copy failed.';
+      document.getElementById('btn-copy-go').disabled = false;
+    }
+  }
+
+  document.getElementById('copy-modal-backdrop').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('copy-modal-backdrop')) closeCopyModal();
+  });
+
+  // ── Help modal ─────────────────────────────────────────────────────────────
+
+  function openHelpModal() {
+    document.getElementById('help-modal-backdrop').classList.remove('hidden');
+  }
+
+  function closeHelpModal() {
+    document.getElementById('help-modal-backdrop').classList.add('hidden');
+  }
+
+  document.getElementById('help-modal-backdrop').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('help-modal-backdrop')) closeHelpModal();
+  });
+
+  // ── Toast ──────────────────────────────────────────────────────────────────
+
+  let _toastTimer = null;
+
+  function showToast(msg) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+  }
+
+  // ── Entry point ────────────────────────────────────────────────────────────
+
+  connectSSE();
+</script>
+</body>
+</html>
