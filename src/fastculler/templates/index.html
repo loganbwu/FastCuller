@@ -32,6 +32,7 @@
     <div class="key-hint"><span class="key-badge">?</span> shortcuts</div>
   </div>
   <div id="header-right">
+    <button class="btn-secondary" id="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
     <button class="btn-secondary" onclick="showPicker()">Change Folder</button>
     <button class="btn-primary" id="btn-copy" onclick="openCopyModal()" disabled>Copy Photos</button>
   </div>
@@ -104,8 +105,9 @@
         <tr><td class="key-cell"><kbd>Home</kbd></td><td>Jump to first unrated photo</td></tr>
         <tr><td class="key-cell"><kbd>End</kbd></td><td>Jump to last unrated photo</td></tr>
         <tr><td class="key-cell"><kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>Undo last rating</td></tr>
+        <tr><td class="key-cell"><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
         <tr><td class="key-cell"><kbd>?</kbd></td><td>Toggle this help</td></tr>
-        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals</td></tr>
+        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals / exit fullscreen</td></tr>
       </tbody>
     </table>
     <div class="modal-buttons">
@@ -396,6 +398,7 @@
   const _held = { left: false, right: false };
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') { toggleFullscreen(); e.preventDefault(); return; }
     if (!_sessionActive) return;
 
     // Help modal takes priority
@@ -783,6 +786,21 @@
     clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
   }
+
+  // ── Fullscreen ─────────────────────────────────────────────────────────────
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen();
+    }
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    const btn = document.getElementById('btn-fullscreen');
+    if (btn) btn.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+  });
 
   // ── Entry point ────────────────────────────────────────────────────────────
 
