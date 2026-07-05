@@ -106,8 +106,11 @@
         <tr><td class="key-cell"><kbd>End</kbd></td><td>Jump to last unrated photo</td></tr>
         <tr><td class="key-cell"><kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>Undo last rating</td></tr>
         <tr><td class="key-cell"><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
+        <tr><td class="key-cell">Pinch / <kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + scroll</td><td>Zoom main image in/out</td></tr>
+        <tr><td class="key-cell">Two-finger swipe</td><td>Pan main image when zoomed in</td></tr>
+        <tr><td class="key-cell">Double-click</td><td>Zoom in to point / reset zoom</td></tr>
         <tr><td class="key-cell"><kbd>?</kbd></td><td>Toggle this help</td></tr>
-        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals / exit fullscreen</td></tr>
+        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals / reset zoom / exit fullscreen</td></tr>
       </tbody>
     </table>
     <div class="modal-buttons">
@@ -324,6 +327,7 @@
     preloadAhead(idx);
 
     if (forceImageLoad || prevIdx !== idx) {
+      resetZoom();
       loadMainImage(idx);
     }
   }
@@ -393,6 +397,122 @@
     }
   }
 
+  // ── Zoom / pan ─────────────────────────────────────────────────────────────
+  // Trackpad pinch is delivered to browsers as a `wheel` event with ctrlKey
+  // set to true (Chrome, Firefox and Safari all do this on macOS), while a
+  // two-finger swipe is a plain `wheel` event with deltaX/deltaY set.
+
+  const ZOOM_MIN = 1;
+  const ZOOM_MAX = 8;
+  const DBLCLICK_ZOOM = 2.5;
+
+  let _zoom = 1, _panX = 0, _panY = 0;
+  let _isPanning = false;
+  let _panStart = null;
+  let _zoomTransTimer = null;
+
+  const mainImg = document.getElementById('main-img');
+  const mainPanel = document.getElementById('main-panel');
+
+  function applyZoomTransform() {
+    mainImg.style.transform = `translate(${_panX}px, ${_panY}px) scale(${_zoom})`;
+    mainImg.classList.toggle('zoomed', _zoom > 1.001);
+  }
+
+  function clampPan() {
+    if (_zoom <= 1) { _panX = 0; _panY = 0; return; }
+    const panelRect = mainPanel.getBoundingClientRect();
+    const maxX = Math.max(0, (mainImg.offsetWidth * _zoom - panelRect.width) / 2);
+    const maxY = Math.max(0, (mainImg.offsetHeight * _zoom - panelRect.height) / 2);
+    _panX = Math.min(maxX, Math.max(-maxX, _panX));
+    _panY = Math.min(maxY, Math.max(-maxY, _panY));
+  }
+
+  function resetZoom() {
+    _zoom = 1; _panX = 0; _panY = 0;
+    applyZoomTransform();
+  }
+
+  function resetZoomAnimated() {
+    mainImg.classList.add('zoom-transition');
+    resetZoom();
+    clearTimeout(_zoomTransTimer);
+    _zoomTransTimer = setTimeout(() => mainImg.classList.remove('zoom-transition'), 220);
+  }
+
+  // Zooms so that the point under (clientX, clientY) stays fixed on screen.
+  function zoomAt(clientX, clientY, newZoom, animated) {
+    newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
+    if (Math.abs(newZoom - _zoom) < 0.001) return;
+    const rect = mainImg.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const ratio = 1 - newZoom / _zoom;
+    _panX += (clientX - cx) * ratio;
+    _panY += (clientY - cy) * ratio;
+    _zoom = newZoom;
+    clampPan();
+    if (animated) {
+      mainImg.classList.add('zoom-transition');
+      clearTimeout(_zoomTransTimer);
+      _zoomTransTimer = setTimeout(() => mainImg.classList.remove('zoom-transition'), 220);
+    }
+    applyZoomTransform();
+  }
+
+  mainPanel.addEventListener('wheel', (e) => {
+    if (!_hasShownImage) return;
+    if (e.ctrlKey) {
+      // Pinch gesture (or Ctrl+scroll) — zoom around the cursor/finger position.
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * 0.02);
+      zoomAt(e.clientX, e.clientY, _zoom * factor, false);
+    } else if (_zoom > 1) {
+      // Two-finger swipe — pan while zoomed in.
+      e.preventDefault();
+      _panX -= e.deltaX;
+      _panY -= e.deltaY;
+      clampPan();
+      applyZoomTransform();
+    }
+  }, { passive: false });
+
+  mainImg.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    if (_zoom > 1.01) {
+      resetZoomAnimated();
+    } else {
+      zoomAt(e.clientX, e.clientY, DBLCLICK_ZOOM, true);
+    }
+  });
+
+  mainImg.addEventListener('mousedown', (e) => {
+    if (_zoom <= 1) return;
+    e.preventDefault();
+    _isPanning = true;
+    _panStart = { x: e.clientX, y: e.clientY, panX: _panX, panY: _panY };
+    mainImg.classList.add('panning');
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!_isPanning) return;
+    _panX = _panStart.panX + (e.clientX - _panStart.x);
+    _panY = _panStart.panY + (e.clientY - _panStart.y);
+    clampPan();
+    applyZoomTransform();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (_isPanning) { _isPanning = false; mainImg.classList.remove('panning'); }
+  });
+
+  // Safari fires these non-standard events for pinch gestures and will zoom
+  // the whole page unless prevented; harmless no-ops in other browsers.
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+  document.addEventListener('gesturechange', (e) => e.preventDefault());
+
+  window.addEventListener('resize', () => { clampPan(); applyZoomTransform(); });
+
   // ── Keyboard handling ──────────────────────────────────────────────────────
 
   const _held = { left: false, right: false };
@@ -414,6 +534,8 @@
     }
 
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+    if (e.key === 'Escape' && _zoom > 1) { resetZoomAnimated(); e.preventDefault(); return; }
 
     // Undo (Cmd+Z / Ctrl+Z)
     if ((e.metaKey || e.ctrlKey) && e.key === 'z') {

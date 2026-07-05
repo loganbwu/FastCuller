@@ -31,7 +31,17 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 | `End` | Jump to last unrated photo |
 | `Cmd/Ctrl` + `Z` | Undo last rating |
 | `?` | Show keyboard shortcut help |
-| `Esc` | Close modals |
+| `Esc` | Close modals / reset zoom |
+
+## Trackpad Gestures (main image)
+
+| Gesture | Action |
+|---------|--------|
+| Pinch (or `Cmd/Ctrl` + scroll) | Zoom in/out, centred on cursor |
+| Two-finger swipe | Pan the image while zoomed in |
+| Double-click | Zoom in to point, or reset if already zoomed |
+
+Zoom resets automatically when navigating to a different photo.
 
 ## Architecture
 
@@ -113,6 +123,6 @@ The app opens in the browser at `http://localhost:5002`.
 - [x] Undo last rating (Cmd/Ctrl+Z)
 - [x] Home/End keys to jump to first/last unrated photo
 - [x] Filmstrip prefetch-ready indicator
-- [ ] Zoom/pan main image
+- [x] Zoom/pan main image
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)

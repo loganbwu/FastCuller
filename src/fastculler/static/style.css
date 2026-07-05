@@ -168,6 +168,8 @@ body {
   min-height: 0;
   background: #0d0d0d;
   position: relative;
+  overflow: hidden;
+  touch-action: none;
 }
 
 #main-img {
@@ -176,7 +178,13 @@ body {
   object-fit: contain;
   display: block;
   user-select: none;
+  transform-origin: center center;
+  will-change: transform;
 }
+
+#main-img.zoomed { cursor: grab; }
+#main-img.panning { cursor: grabbing; }
+#main-img.zoom-transition { transition: transform 0.2s ease-out; }
 
 /* ── Loading / done overlay ── */
 
