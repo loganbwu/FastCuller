@@ -178,6 +178,19 @@ def get_thumbnail_jpeg(cr3_path: Path, size: tuple = THUMBNAIL_SIZE) -> bytes:
     return buf.getvalue()
 
 
+def thumbnail_from_jpeg(jpeg_bytes: bytes, size: tuple = THUMBNAIL_SIZE) -> bytes:
+    """Return a resized JPEG thumbnail derived from already-decoded JPEG bytes.
+
+    Much cheaper than get_thumbnail_jpeg() when a full preview has already been
+    extracted — skips reopening the raw file and re-running the CR3/rawpy decode.
+    """
+    img = Image.open(io.BytesIO(jpeg_bytes)).convert("RGB")
+    img.thumbnail(size, Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=75)
+    return buf.getvalue()
+
+
 def _rational_to_float(v) -> float:
     """Convert a PIL IFRational, (num, den) tuple, or plain number to float."""
     if hasattr(v, 'numerator') and hasattr(v, 'denominator'):

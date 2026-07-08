@@ -305,7 +305,8 @@ body {
   padding: 6px 4px;
   overflow-x: auto;
   overflow-y: hidden;
-  scroll-behavior: smooth;
+  /* Centering animation is driven entirely by JS (see animateFilmstripTo) so it can be
+     precisely interrupted/cancelled — deliberately no `scroll-behavior: smooth` here. */
   scrollbar-width: thin;
   scrollbar-color: #444 #141414;
 }

@@ -75,12 +75,19 @@ tests/
 
 ## Prefetch Strategy
 
-For each navigation action the server pre-loads (in the background) the images most likely to be shown next:
+The server keeps a pool of persistent background workers that continuously pick the
+highest-priority not-yet-cached image relative to whatever the *current* index is,
+re-evaluating on every pick. Priority (highest first):
 
 - Current image
-- Next and previous photos in sequence
+- Next and previous photos in sequence (nearest first)
 - Next and previous photos with 0 stars
 - Next and previous photos with 1 star
+
+Because priority is re-evaluated live rather than queued as a fixed batch of tasks per
+navigation, rapid navigation (e.g. flicking through many photos quickly) doesn't leave
+workers stuck working through a backlog of now-stale requests — they simply retarget to
+whatever is now closest to the current photo.
 
 ## XMP Rating Format
 

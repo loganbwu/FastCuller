@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -18,6 +17,7 @@ from .main import (
     get_preview_jpeg,
     get_thumbnail_jpeg,
     read_xmp_rating,
+    thumbnail_from_jpeg,
     write_xmp_rating,
 )
 
@@ -25,6 +25,8 @@ THUMBNAIL_CACHE_MAX = 100   # max thumbnails kept in memory
 IMAGE_CACHE_MAX = 150       # max full-size images kept in memory
 PREFETCH_WINDOW = 10        # sequential backward and per-rating neighbours to prefetch
 PREFETCH_FORWARD = 50       # sequential forward neighbours to prefetch
+PREFETCH_WORKERS = 4        # persistent full-image prefetch worker threads
+THUMB_PREFETCH_WORKERS = 2  # persistent thumbnail prefetch worker threads
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -69,7 +71,33 @@ class CullerState:
         self._thumb_cache: dict = {}          # idx → bytes (thumbnail JPEG)
         self._thumb_order: list = []          # insertion order for LRU eviction
         self._lock = threading.Lock()
-        self._prefetch_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='prefetch')
+
+        # Prefetch: persistent workers that always pick the highest-priority
+        # (closest to current_idx) not-yet-cached index. Unlike a FIFO task
+        # queue, this re-evaluates priority on every pick, so rapid navigation
+        # doesn't leave workers stuck churning through a backlog of stale requests.
+        # Full images and thumbnails get separate worker pools/caches since a
+        # filmstrip window and a "likely to view next" window differ in size.
+        self._prefetch_inflight: set = set()
+        self._prefetch_failed: set = set()
+        self._prefetch_cv = threading.Condition()
+        self._thumb_inflight: set = set()
+        self._thumb_failed: set = set()
+        self._thumb_cv = threading.Condition()
+        for _ in range(PREFETCH_WORKERS):
+            threading.Thread(
+                target=self._run_prefetch_worker,
+                args=(self._prefetch_cv, self._prefetch_inflight, self._prefetch_failed,
+                      self._image_cache, IMAGE_CACHE_MAX, self._load_image),
+                daemon=True,
+            ).start()
+        for _ in range(THUMB_PREFETCH_WORKERS):
+            threading.Thread(
+                target=self._run_prefetch_worker,
+                args=(self._thumb_cv, self._thumb_inflight, self._thumb_failed,
+                      self._thumb_cache, THUMBNAIL_CACHE_MAX, self._load_thumb),
+                daemon=True,
+            ).start()
 
         # Load existing ratings from XMP sidecars
         pre_rated = 0
@@ -162,40 +190,76 @@ class CullerState:
     # ── Prefetch ──────────────────────────────────────────────────────────────
 
     def _prefetch_indices(self, current: int) -> list:
-        """Indices to keep warm in the image cache."""
+        """Indices to keep warm in the image cache, ordered nearest-priority first."""
         n = len(self.files)
-        indices = set()
-        indices.add(current)
-        # Sequential neighbours — deeper look-ahead going forward
-        for d, window in ((-1, PREFETCH_WINDOW), (1, PREFETCH_FORWARD)):
-            for step in range(1, window + 1):
-                nxt = current + d * step
-                if 0 <= nxt < n:
-                    indices.add(nxt)
-        # Rating-tier neighbours
+        ordered = []
+        seen = set()
+
+        def add(i):
+            if 0 <= i < n and i not in seen:
+                seen.add(i)
+                ordered.append(i)
+
+        add(current)
+        # Sequential neighbours, interleaved nearest-first — deeper look-ahead going forward
+        for step in range(1, max(PREFETCH_WINDOW, PREFETCH_FORWARD) + 1):
+            if step <= PREFETCH_FORWARD:
+                add(current + step)
+            if step <= PREFETCH_WINDOW:
+                add(current - step)
+        # Rating-tier neighbours (lowest priority)
         for rating in (0, 1):
             for d in (-1, 1):
                 for i in self._n_with_rating(current, rating, d, PREFETCH_WINDOW):
-                    indices.add(i)
-        return list(indices)
+                    add(i)
+        return ordered
 
     def _trigger_prefetch(self, current: int):
-        indices = self._prefetch_indices(current)
-        queued = [i for i in indices if i not in self._image_cache]
-        if queued:
-            print(f"  {_DIM}Prefetch queued: {sorted(i + 1 for i in queued)}{_RESET}")
-        for idx in queued:
-            self._prefetch_executor.submit(self._load_image, idx)
+        """Wake idle prefetch workers so they re-evaluate priority against the new current index."""
+        with self._prefetch_cv:
+            self._prefetch_cv.notify_all()
+        with self._thumb_cv:
+            self._thumb_cv.notify_all()
 
-    def _load_image(self, idx: int):
+    def _run_prefetch_worker(self, cv, inflight: set, failed: set, cache: dict, cache_max: int, loader):
+        """Generic prefetch loop shared by the full-image and thumbnail worker pools.
+
+        Repeatedly picks the highest-priority (closest to current_idx) index that
+        isn't cached or already being fetched, and loads it. Only ever considers as
+        many candidates as `cache_max` — otherwise, with a desired working set larger
+        than the cache, workers would keep fetching low-priority indices that
+        immediately evict higher-priority ones, thrashing forever. Indices whose load
+        fails are remembered in `failed` and skipped from then on — otherwise a single
+        permanently unreadable file would pin a worker in a tight retry loop forever.
+        """
+        def next_target():
+            for idx in self._prefetch_indices(self.current_idx)[:cache_max]:
+                if idx not in cache and idx not in inflight and idx not in failed:
+                    return idx
+            return None
+
+        while True:
+            with cv:
+                idx = next_target()
+                while idx is None:
+                    cv.wait()
+                    idx = next_target()
+                inflight.add(idx)
+            ok = loader(idx)
+            with cv:
+                inflight.discard(idx)
+                if not ok:
+                    failed.add(idx)
+
+    def _load_image(self, idx: int) -> bool:
         if idx in self._image_cache:
-            return
+            return True
         name = self.files[idx].name
         try:
             data = get_preview_jpeg(self.files[idx])
         except Exception as e:
             print(f"  {_RED}Prefetch error [{idx + 1}] {name}: {e}{_RESET}")
-            return
+            return False
         exif = {}
         try:
             exif = get_exif_info(self.files[idx])
@@ -210,6 +274,7 @@ class CullerState:
             self._exif_cache[idx] = exif
         kb = len(data) // 1024
         print(f"  {_DIM}Prefetched [{idx + 1}] {name} ({kb} KB){_RESET}")
+        return True
 
     def get_image(self, idx: int) -> bytes:
         if idx in self._image_cache:
@@ -232,12 +297,19 @@ class CullerState:
             self._exif_cache[idx] = exif
         return exif
 
-    def get_thumbnail(self, idx: int) -> bytes:
-        if idx in self._thumb_cache:
-            return self._thumb_cache[idx]
-        data = get_thumbnail_jpeg(self.files[idx])
+    def _fetch_thumbnail_bytes(self, idx: int) -> bytes:
+        """Derive the thumbnail from an already-cached full preview when possible —
+        much cheaper than reopening the raw file and re-running the CR3/rawpy decode.
+        Falls back to a full decode if the cached bytes can't be read for any reason."""
+        if idx in self._image_cache:
+            try:
+                return thumbnail_from_jpeg(self._image_cache[idx])
+            except Exception:
+                pass
+        return get_thumbnail_jpeg(self.files[idx])
+
+    def _store_thumb(self, idx: int, data: bytes):
         with self._lock:
-            # LRU eviction
             if idx in self._thumb_order:
                 self._thumb_order.remove(idx)
             self._thumb_order.append(idx)
@@ -245,6 +317,25 @@ class CullerState:
                 evict = self._thumb_order.pop(0)
                 self._thumb_cache.pop(evict, None)
             self._thumb_cache[idx] = data
+
+    def _load_thumb(self, idx: int) -> bool:
+        if idx in self._thumb_cache:
+            return True
+        name = self.files[idx].name
+        try:
+            data = self._fetch_thumbnail_bytes(idx)
+        except Exception as e:
+            print(f"  {_RED}Thumbnail prefetch error [{idx + 1}] {name}: {e}{_RESET}")
+            return False
+        self._store_thumb(idx, data)
+        return True
+
+    def get_thumbnail(self, idx: int) -> bytes:
+        if idx in self._thumb_cache:
+            return self._thumb_cache[idx]
+        # On-demand load on cache miss
+        data = self._fetch_thumbnail_bytes(idx)
+        self._store_thumb(idx, data)
         return data
 
     # ── Serialisation ─────────────────────────────────────────────────────────

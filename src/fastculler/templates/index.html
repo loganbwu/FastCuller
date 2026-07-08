@@ -305,6 +305,15 @@
   // ── Image display ──────────────────────────────────────────────────────────
 
   let _loadingIdx = null;
+  let _mainImageSettledIdx = null;  // last idx loadMainImage has resolved (success or failure)
+
+  // True once the main image has caught up with _currentIdx. Used to hold off further
+  // navigation while rapid-fire input (e.g. holding an arrow key) has raced ahead of
+  // what's actually loaded — otherwise the filename/progress/filmstrip keep advancing
+  // while the displayed photo silently falls behind and never visibly catches up.
+  function mainImageCaughtUp() {
+    return !_hasShownImage || _mainImageSettledIdx === _currentIdx;
+  }
 
   function setCurrentIdx(idx, forceImageLoad) {
     const prevIdx = _currentIdx;
@@ -336,6 +345,7 @@
     _loadingIdx = idx;
     const img = document.getElementById('main-img');
     if (img.getAttribute('data-idx') == idx) {
+      _mainImageSettledIdx = idx;
       return;
     }
     if (!_hasShownImage) {
@@ -350,10 +360,13 @@
         _hasShownImage = true;
         hideOverlay();
       }
+      _mainImageSettledIdx = idx;
     };
     tmp.onerror = () => {
       if (_loadingIdx !== idx) return;
       if (!_hasShownImage) hideOverlay();
+      // Still mark settled — a failed load must not permanently block navigation.
+      _mainImageSettledIdx = idx;
     };
     tmp.src = `/api/image/${idx}?v=${_sessionVer}`;
   }
@@ -598,6 +611,9 @@
 
   async function navigate(idx) {
     if (idx < 0 || idx >= _total) return;
+    // Holding an arrow key auto-repeats far faster than a raw-photo decode can keep up —
+    // don't let the index race ahead of what's actually been loaded and displayed.
+    if (!mainImageCaughtUp()) return;
     setCurrentIdx(idx, true);
     await fetch('/api/navigate', {
       method: 'POST',
@@ -674,6 +690,8 @@
   const _thumbLoaded = new Set();
   let _filmstripReady = false;  // false until the first centreFilmstripOn of a session
   let _thumbScrollTimer = null;
+  let _thumbLastRun = 0;
+  const THUMB_SCROLL_THROTTLE = 150;  // ms between loads while actively scrolling
 
   function buildFilmstrip(total) {
     _filmstripReady = false;
@@ -714,11 +732,21 @@
     });
   }
 
-  // Scroll listener: runs loadVisibleThumbnails once the strip has settled.
+  // Scroll listener: throttled during active scrolling so thumbnails populate
+  // progressively rather than only once the strip settles, plus a trailing call
+  // 80ms after the last event to precisely catch the final resting position.
   // Layout shifts from thumbnails loading do NOT trigger this — only user scroll does.
   document.getElementById('filmstrip').addEventListener('scroll', () => {
     clearTimeout(_thumbScrollTimer);
-    _thumbScrollTimer = setTimeout(loadVisibleThumbnails, 80);
+    const now = Date.now();
+    if (now - _thumbLastRun >= THUMB_SCROLL_THROTTLE) {
+      _thumbLastRun = now;
+      loadVisibleThumbnails();
+    }
+    _thumbScrollTimer = setTimeout(() => {
+      _thumbLastRun = Date.now();
+      loadVisibleThumbnails();
+    }, 80);
   }, { passive: true });
 
   function loadThumb(idx, item) {
@@ -728,6 +756,11 @@
     img.onload = () => {
       const placeholder = item.querySelector('.thumb-placeholder');
       if (placeholder) placeholder.replaceWith(img);
+      // Swapping a placeholder for the real image can change its width (thumbnails
+      // aren't all the same aspect ratio), which shifts every item after it in the
+      // row — including, indirectly, the current item's position. Re-centre so the
+      // strip never drifts off-centre as thumbnails keep loading in.
+      resnapFilmstripIfDrifted();
     };
     img.src = `/api/thumbnail/${idx}?v=${_sessionVer}`;
   }
@@ -738,21 +771,73 @@
     if (el) el.classList.add('current');
   }
 
-  function centreFilmstripOn(idx) {
+  // Filmstrip centering is animated with our own requestAnimationFrame tween rather
+  // than CSS `scroll-behavior: smooth` — that gives no way to tell whether a glide is
+  // still in flight, so a rapid next navigation could only guess (via a timer) whether
+  // to interrupt it. Owning the loop means we always know exactly when one is running.
+  let _filmstripAnimId = null;
+  const FILMSTRIP_GLIDE_MS = 260;
+
+  function filmstripTargetOffset(idx) {
     const el = document.querySelector(`.thumb-item[data-idx="${idx}"]`);
-    if (!el) return;
+    if (!el) return null;
     const strip = document.getElementById('filmstrip');
     const stripRect = strip.getBoundingClientRect();
     const elRect = el.getBoundingClientRect();
-    const offset = elRect.left - stripRect.left + strip.scrollLeft - stripRect.width / 2 + elRect.width / 2;
-    if (_filmstripReady) {
-      strip.scrollTo({ left: offset, behavior: 'smooth' });
-    } else {
+    return elRect.left - stripRect.left + strip.scrollLeft - stripRect.width / 2 + elRect.width / 2;
+  }
+
+  function snapFilmstripTo(offset) {
+    if (_filmstripAnimId !== null) {
+      cancelAnimationFrame(_filmstripAnimId);
+      _filmstripAnimId = null;
+    }
+    document.getElementById('filmstrip').scrollLeft = offset;
+  }
+
+  function animateFilmstripTo(targetOffset) {
+    const strip = document.getElementById('filmstrip');
+    const startOffset = strip.scrollLeft;
+    const delta = targetOffset - startOffset;
+    const startTime = performance.now();
+    const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+
+    function step(now) {
+      const t = Math.min(1, (now - startTime) / FILMSTRIP_GLIDE_MS);
+      strip.scrollLeft = startOffset + delta * easeOutCubic(t);
+      _filmstripAnimId = t < 1 ? requestAnimationFrame(step) : null;
+    }
+    _filmstripAnimId = requestAnimationFrame(step);
+  }
+
+  function centreFilmstripOn(idx) {
+    const offset = filmstripTargetOffset(idx);
+    if (offset === null) return;
+    if (!_filmstripReady) {
       // Jump instantly on initial load so only the thumbnails at the final
       // scroll position are loaded, not every photo scrolled past.
-      strip.scrollLeft = offset;
+      snapFilmstripTo(offset);
       _filmstripReady = true;
       loadVisibleThumbnails();
+      return;
+    }
+    if (_filmstripAnimId !== null) {
+      // The previous glide hasn't finished — snap straight to the new target
+      // instead of restarting another glide, which would look jittery.
+      snapFilmstripTo(offset);
+    } else {
+      animateFilmstripTo(offset);
+    }
+  }
+
+  function resnapFilmstripIfDrifted() {
+    // Don't fight a glide the user is actively watching — only correct drift while idle.
+    if (_filmstripAnimId !== null || !_filmstripReady) return;
+    const offset = filmstripTargetOffset(_currentIdx);
+    if (offset === null) return;
+    const strip = document.getElementById('filmstrip');
+    if (Math.abs(offset - strip.scrollLeft) > 0.5) {
+      strip.scrollLeft = offset;
     }
   }
 

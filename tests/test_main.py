@@ -355,10 +355,22 @@ class TestCullerState:
         data = state_with_mock_files.get_thumbnail(0)
         assert isinstance(data, bytes)
 
-    def test_thumbnail_lru_eviction(self, state_with_mock_files, monkeypatch):
+    def test_thumbnail_lru_eviction(self, tmp_path, monkeypatch):
+        from fastculler.web import CullerState
         from fastculler import web as web_module
+
+        files = []
+        for i in range(5):
+            p = tmp_path / f"photo_{i:03d}.cr3"
+            p.touch()
+            files.append(p)
+
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
         monkeypatch.setattr(web_module, 'THUMBNAIL_CACHE_MAX', 3)
-        state = state_with_mock_files
+        # Disable background prefetch workers so the cache starts empty and we control all insertions
+        monkeypatch.setattr(CullerState, '_run_prefetch_worker', lambda self, *a: None)
+
+        state = CullerState(files)
         # Access 4 thumbnails — first should be evicted
         for i in range(4):
             state.get_thumbnail(i)
@@ -378,8 +390,8 @@ class TestCullerState:
         monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
         monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
         monkeypatch.setattr(web_module, 'IMAGE_CACHE_MAX', 3)
-        # Disable auto-prefetch so the cache starts empty and we control all insertions
-        monkeypatch.setattr(CullerState, '_trigger_prefetch', lambda self, idx: None)
+        # Disable background prefetch workers so the cache starts empty and we control all insertions
+        monkeypatch.setattr(CullerState, '_run_prefetch_worker', lambda self, *a: None)
 
         state = CullerState(files)
         for i in range(4):
