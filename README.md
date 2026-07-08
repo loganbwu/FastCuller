@@ -10,8 +10,9 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 - Rating summary in the header (count per star tier)
 - EXIF metadata overlay on main image (ISO, shutter, aperture, focal length, lens)
 - Keyboard shortcuts for efficient culling
-- Server-side prefetch with LRU image cache (30 full images, 100 thumbnails)
+- Background prefetch of images and thumbnails, with in-memory LRU caching
 - Copy rated photos (and XMP files) to a chosen destination
+- Fullscreen mode (button or `F` key)
 
 ## Keyboard Shortcuts
 
@@ -30,8 +31,9 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 | `Home` | Jump to first unrated photo |
 | `End` | Jump to last unrated photo |
 | `Cmd/Ctrl` + `Z` | Undo last rating |
+| `F` | Toggle fullscreen |
 | `?` | Show keyboard shortcut help |
-| `Esc` | Close modals / reset zoom |
+| `Esc` | Close modals / reset zoom / exit fullscreen |
 
 ## Trackpad Gestures (main image)
 
@@ -75,19 +77,9 @@ tests/
 
 ## Prefetch Strategy
 
-The server keeps a pool of persistent background workers that continuously pick the
-highest-priority not-yet-cached image relative to whatever the *current* index is,
-re-evaluating on every pick. Priority (highest first):
-
-- Current image
-- Next and previous photos in sequence (nearest first)
-- Next and previous photos with 0 stars
-- Next and previous photos with 1 star
-
-Because priority is re-evaluated live rather than queued as a fixed batch of tasks per
-navigation, rapid navigation (e.g. flicking through many photos quickly) doesn't leave
-workers stuck working through a backlog of now-stale requests — they simply retarget to
-whatever is now closest to the current photo.
+The server prefetches images and thumbnails in the background, prioritizing the current
+photo, then nearby photos in sequence, then 0- and 1-star neighbours — so navigation
+stays responsive even when flicking through many photos quickly.
 
 ## XMP Rating Format
 
@@ -131,5 +123,8 @@ The app opens in the browser at `http://localhost:5002`.
 - [x] Home/End keys to jump to first/last unrated photo
 - [x] Filmstrip prefetch-ready indicator
 - [x] Zoom/pan main image
+- [x] Fullscreen mode
+- [x] Thumbnail prefetch
+- [x] Smooth, responsive filmstrip and navigation under rapid input
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)
