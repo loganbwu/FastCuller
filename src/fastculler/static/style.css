@@ -455,6 +455,68 @@ body {
   white-space: nowrap;
 }
 
+/* ── Export XMP modal ── */
+
+#export-xmp-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+
+#export-xmp-modal-backdrop.hidden { display: none; }
+
+#export-xmp-modal {
+  background: #1e1e1e;
+  border: 1px solid #444;
+  padding: 28px 32px;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+#export-xmp-modal-title {
+  font-family: 'Oswald', sans-serif;
+  font-size: 18px;
+  text-transform: uppercase;
+  color: var(--white);
+}
+
+#export-xmp-dest-path {
+  color: var(--paragraph-text-color);
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#export-xmp-progress-bar {
+  width: 100%;
+  height: 4px;
+  background: #333;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#export-xmp-progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--pale-blue);
+  border-radius: 2px;
+  transition: width 0.15s ease-out;
+}
+
+#export-xmp-modal-status {
+  font-size: 13px;
+  color: var(--pale-blue);
+  min-height: 18px;
+}
+
 /* ── Help modal ── */
 
 #help-modal-backdrop {

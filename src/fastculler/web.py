@@ -656,6 +656,67 @@ def create_app() -> Flask:
 
         return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
 
+    # ── Export XMP sidecars only ─────────────────────────────────────────────
+
+    @app.route("/api/export-xmp", methods=["POST"])
+    def api_export_xmp():
+        import json as _json
+        state = app.config["culler_state"]
+        if state is None:
+            return jsonify({"error": "no active session"}), 400
+        data = request.json or {}
+        dest_str = data.get("destination", "")
+
+        dest = Path(dest_str).expanduser().resolve()
+        if not dest.exists():
+            return jsonify({"error": f"Destination does not exist: {dest}"}), 400
+
+        to_export = list(state.files)
+        total = len(to_export)
+        print(f"\n{_BOLD}Exporting XMP sidecars{_RESET} for {total} file(s)"
+              f" → {_CYAN}{dest}{_RESET}")
+
+        def generate():
+            exported = 0
+            missing = 0
+            errors = []
+            for i, src in enumerate(to_export):
+                try:
+                    xmp = src.with_suffix('.xmp')
+                    if not xmp.exists():
+                        missing += 1
+                    else:
+                        # Preserve the folder structure relative to the scanned root,
+                        # same as /api/copy, so sidecars land in the matching
+                        # subfolder of the destination.
+                        rel = src.relative_to(state.root).with_suffix('.xmp')
+                        dst_path = dest / rel
+                        dst_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(xmp, dst_path)
+                        print(f"  {_GREEN}Exported{_RESET} {rel}")
+                        exported += 1
+                except Exception as e:
+                    print(f"  {_RED}Error{_RESET}   {src.name}: {e}")
+                    errors.append(str(e))
+                yield _json.dumps({
+                    "progress": i + 1, "total": total,
+                    "exported": exported, "missing": missing, "errors": errors,
+                }) + '\n'
+
+            parts = [f"{exported} exported"]
+            if missing:
+                parts.append(f"{missing} had no rating yet")
+            if errors:
+                parts.append(f"{len(errors)} error(s)")
+            colour = _YELLOW if errors else _GREEN
+            print(f"  {colour}Done: {', '.join(parts)}.{_RESET}")
+            yield _json.dumps({
+                "ok": True, "progress": total, "total": total,
+                "exported": exported, "missing": missing, "errors": errors,
+            }) + '\n'
+
+        return Response(stream_with_context(generate()), mimetype='application/x-ndjson')
+
     return app
 
 

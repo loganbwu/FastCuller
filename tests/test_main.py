@@ -329,6 +329,98 @@ class TestFlaskApp:
         assert (dest / "100CANON" / "IMG_0001.CR3").exists()
         assert (dest / "101CANON" / "IMG_0001.CR3").exists()
 
+    def test_export_xmp_preserves_subfolder_structure_and_overwrites(self, tmp_path, monkeypatch):
+        """Export XMP should mirror the source subfolder layout, only export
+        sidecars for rated photos, and overwrite a stale destination sidecar
+        with the latest rating on re-export (unlike Copy, which skips)."""
+        import json
+        import time
+        from fastculler.web import create_app
+        from fastculler import main as main_mod
+
+        src_root = tmp_path / "src"
+        dest = tmp_path / "dest"
+        (src_root / "100CANON").mkdir(parents=True)
+        (src_root / "101CANON").mkdir(parents=True)
+        (src_root / "102CANON").mkdir(parents=True)
+        dest.mkdir()
+
+        f1 = src_root / "100CANON" / "IMG_0001.CR3"
+        f2 = src_root / "101CANON" / "IMG_0001.CR3"
+        f3 = src_root / "102CANON" / "IMG_0001.CR3"  # left unrated
+        f1.touch()
+        f2.touch()
+        f3.touch()
+
+        capture_times = {
+            '100CANON': '2024:01:01 00:00:01',
+            '101CANON': '2024:01:01 00:00:02',
+            '102CANON': '2024:01:01 00:00:03',
+        }
+        monkeypatch.setattr(
+            main_mod, 'get_capture_time',
+            lambda p: next(t for folder, t in capture_times.items() if folder in str(p)))
+        monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
+        monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
+
+        app = create_app()
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            resp = c.post('/api/start', json={'path': str(src_root)})
+            assert resp.status_code == 200
+
+            deadline = time.monotonic() + 5
+            state = None
+            while time.monotonic() < deadline:
+                r = c.get('/api/state').get_json()
+                if r['status'] == 'ready':
+                    state = r
+                    break
+                if r['status'] == 'error':
+                    pytest.fail(f"Session startup error: {r.get('message')}")
+                time.sleep(0.05)
+            assert state is not None
+            assert state['total'] == 3
+
+            # Rate the first two photos (sorted by capture time: f1, f2, f3);
+            # leave f3 unrated so it has no sidecar to export.
+            resp = c.post('/api/rate', json={'idx': 0, 'rating': 3, 'advance': False})
+            assert resp.status_code == 200
+            resp = c.post('/api/rate', json={'idx': 1, 'rating': 1, 'advance': False})
+            assert resp.status_code == 200
+
+            resp = c.post('/api/export-xmp', json={'destination': str(dest)})
+            assert resp.status_code == 200
+            lines = [line for line in resp.data.decode().splitlines() if line]
+            final = json.loads(lines[-1])
+            assert final['exported'] == 2
+            assert final['missing'] == 1
+
+            dst1 = dest / "100CANON" / "IMG_0001.xmp"
+            dst2 = dest / "101CANON" / "IMG_0001.xmp"
+            assert dst1.exists()
+            assert dst2.exists()
+            assert not (dest / "102CANON" / "IMG_0001.xmp").exists()
+            assert '<xmp:Rating>3</xmp:Rating>' in dst1.read_text()
+
+            # Re-rate the first photo and re-export: the destination sidecar
+            # should be overwritten with the new rating, not skipped.
+            resp = c.post('/api/rate', json={'idx': 0, 'rating': 5, 'advance': False})
+            assert resp.status_code == 200
+
+            resp = c.post('/api/export-xmp', json={'destination': str(dest)})
+            assert resp.status_code == 200
+            lines = [line for line in resp.data.decode().splitlines() if line]
+            final = json.loads(lines[-1])
+            assert final['exported'] == 2
+
+            assert '<xmp:Rating>5</xmp:Rating>' in dst1.read_text()
+
+    def test_export_xmp_without_session(self, client):
+        resp = client.post('/api/export-xmp', json={'destination': '/tmp'})
+        assert resp.status_code == 400
+
 
 # ── CullerState unit tests ────────────────────────────────────────────────────
 

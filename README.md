@@ -12,6 +12,7 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 - Keyboard shortcuts for efficient culling
 - Background prefetch of images and thumbnails, with in-memory LRU caching
 - Copy rated photos (and XMP files) to a chosen destination
+- Export XMP sidecar files only (no photos), preserving folder structure — useful for merging a collaborator's ratings into your own copy of the same photos
 - Fullscreen mode (button or `F` key)
 
 ## Keyboard Shortcuts
@@ -74,6 +75,7 @@ tests/
 | `/api/navigate` | POST | Navigate to a photo by index |
 | `/api/rate` | POST | Rate current photo, optionally advance |
 | `/api/copy` | POST | Copy photos by rating to a destination folder |
+| `/api/export-xmp` | POST | Export XMP sidecars only to a destination, preserving folder structure |
 
 ## Prefetch Strategy
 
@@ -146,6 +148,19 @@ Folder structure is flexible — a common approach is one subfolder per camera (
 - A specific subfolder (only those photos are loaded), or
 - The top-level folder (all CR3 files in every subfolder are loaded together, sorted by capture time).
 
+### Sharing ratings with a collaborator
+
+If a collaborator has their own copy of the same folder hierarchy (e.g. synced separately rather
+than sent to you directly), they don't need to send you the photos back — just their ratings:
+
+1. They point FastCuller at their copy of the folder and rate photos as usual.
+2. They click **Export XMP** and choose a destination — this writes only the `.xmp` sidecar files,
+   mirroring the same subfolder structure, with no photos included.
+3. They send you that (small) folder of `.xmp` files.
+4. You copy those files into the matching subfolders of your own copy, overwriting any existing
+   `.xmp` files for the same photos.
+5. Reload the folder in FastCuller (or open it in Lightroom) to pick up the new ratings.
+
 ## Roadmap
 
 - [x] Project setup with rye
@@ -172,5 +187,6 @@ Folder structure is flexible — a common approach is one subfolder per camera (
 - [x] Fullscreen mode
 - [x] Thumbnail prefetch
 - [x] Smooth, responsive filmstrip and navigation under rapid input
+- [x] Export XMP sidecars only, preserving folder structure
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)

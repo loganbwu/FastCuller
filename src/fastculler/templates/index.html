@@ -34,6 +34,7 @@
   <div id="header-right">
     <button class="btn-secondary" id="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
     <button class="btn-secondary" onclick="showPicker()">Change Folder</button>
+    <button class="btn-secondary" id="btn-export-xmp" onclick="openExportXmpModal()" disabled>Export XMP</button>
     <button class="btn-primary" id="btn-copy" onclick="openCopyModal()" disabled>Copy Photos</button>
   </div>
 </div>
@@ -87,6 +88,26 @@
   </div>
 </div>
 
+<!-- ── Export XMP modal ── -->
+<div id="export-xmp-modal-backdrop" class="hidden">
+  <div id="export-xmp-modal">
+    <div id="export-xmp-modal-title">Export XMP Sidecars</div>
+    <div class="modal-row">
+      <span class="modal-label">To:</span>
+      <span id="export-xmp-dest-path">No folder selected</span>
+      <button class="btn-secondary" onclick="pickExportXmpDestination()">Browse</button>
+    </div>
+    <div id="export-xmp-progress-bar" style="display:none">
+      <div id="export-xmp-progress-bar-fill"></div>
+    </div>
+    <div id="export-xmp-modal-status"></div>
+    <div class="modal-buttons">
+      <button class="btn-secondary" onclick="closeExportXmpModal()">Cancel</button>
+      <button class="btn-primary" id="btn-export-xmp-go" onclick="doExportXmp()" disabled>Export</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Help modal ── -->
 <div id="help-modal-backdrop" class="hidden">
   <div id="help-modal">
@@ -131,6 +152,7 @@
   let _ratings = [];          // array of ratings per photo (0 = unrated/0-star)
   let _prefetchReady = [];    // indices with image cached server-side
   let _copyDest = null;
+  let _exportXmpDest = null;
   let _es = null;
   let _sessionActive = false;
   let _hasShownImage = false;
@@ -229,6 +251,7 @@
         _sessionActive = true;
         resetZoom();
         document.getElementById('btn-copy').disabled = false;
+        document.getElementById('btn-export-xmp').disabled = false;
         buildFilmstrip(data.total);
 
         // Restore saved position for this folder
@@ -289,6 +312,7 @@
     _ratings = [];
     _ratingHistory.length = 0;
     document.getElementById('btn-copy').disabled = true;
+    document.getElementById('btn-export-xmp').disabled = true;
     document.getElementById('filmstrip').innerHTML = '';
     document.getElementById('exif-bar').innerHTML = '';
 
@@ -584,6 +608,12 @@
     // Copy modal: Escape to close
     if (document.querySelector('#copy-modal-backdrop:not(.hidden)')) {
       if (e.key === 'Escape') closeCopyModal();
+      return;
+    }
+
+    // Export XMP modal: Escape to close
+    if (document.querySelector('#export-xmp-modal-backdrop:not(.hidden)')) {
+      if (e.key === 'Escape') closeExportXmpModal();
       return;
     }
 
@@ -1009,6 +1039,102 @@
 
   document.getElementById('copy-modal-backdrop').addEventListener('click', (e) => {
     if (e.target === document.getElementById('copy-modal-backdrop')) closeCopyModal();
+  });
+
+  // ── Export XMP modal ────────────────────────────────────────────────────────
+
+  function openExportXmpModal() {
+    _exportXmpDest = null;
+    document.getElementById('export-xmp-dest-path').textContent = 'No folder selected';
+    document.getElementById('export-xmp-modal-status').textContent = '';
+    document.getElementById('export-xmp-progress-bar').style.display = 'none';
+    document.getElementById('export-xmp-progress-bar-fill').style.width = '0%';
+    document.getElementById('btn-export-xmp-go').disabled = true;
+    document.getElementById('export-xmp-modal-backdrop').classList.remove('hidden');
+  }
+
+  function closeExportXmpModal() {
+    document.getElementById('export-xmp-modal-backdrop').classList.add('hidden');
+  }
+
+  async function pickExportXmpDestination() {
+    const res = await fetch('/api/pick-destination');
+    const data = await res.json();
+    if (data.path) {
+      _exportXmpDest = data.path;
+      document.getElementById('export-xmp-dest-path').textContent = data.path;
+      document.getElementById('btn-export-xmp-go').disabled = false;
+    }
+  }
+
+  async function doExportXmp() {
+    if (!_exportXmpDest) return;
+    const statusEl = document.getElementById('export-xmp-modal-status');
+    const progressEl = document.getElementById('export-xmp-progress-bar-fill');
+    statusEl.textContent = 'Starting...';
+    progressEl.style.width = '0%';
+    document.getElementById('export-xmp-progress-bar').style.display = '';
+    document.getElementById('btn-export-xmp-go').disabled = true;
+
+    let lastData = null;
+    try {
+      const res = await fetch('/api/export-xmp', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({destination: _exportXmpDest}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const data = JSON.parse(line);
+          lastData = data;
+          const pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
+          progressEl.style.width = pct + '%';
+          statusEl.textContent =
+            `Exporting ${data.progress} / ${data.total}` +
+            (data.errors.length ? ` (${data.errors.length} error${data.errors.length > 1 ? 's' : ''})` : '');
+        }
+      }
+    } catch (e) {
+      document.getElementById('export-xmp-progress-bar').style.display = 'none';
+      statusEl.textContent = e.message || 'Export failed.';
+      document.getElementById('btn-export-xmp-go').disabled = false;
+      return;
+    }
+
+    document.getElementById('export-xmp-progress-bar').style.display = 'none';
+    if (lastData && lastData.ok) {
+      const parts = [`Exported ${lastData.exported} file${lastData.exported !== 1 ? 's' : ''}`];
+      if (lastData.missing) parts.push(`${lastData.missing} had no rating yet`);
+      if (lastData.errors.length) parts.push(`${lastData.errors.length} error(s)`);
+      const msg = parts.join(', ') + '.';
+      statusEl.textContent = msg;
+      if (!lastData.errors.length) {
+        setTimeout(() => { closeExportXmpModal(); showToast(msg); }, 1500);
+      } else {
+        document.getElementById('btn-export-xmp-go').disabled = false;
+      }
+    } else {
+      statusEl.textContent = 'Export failed.';
+      document.getElementById('btn-export-xmp-go').disabled = false;
+    }
+  }
+
+  document.getElementById('export-xmp-modal-backdrop').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('export-xmp-modal-backdrop')) closeExportXmpModal();
   });
 
   // ── Help modal ─────────────────────────────────────────────────────────────
