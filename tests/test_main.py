@@ -273,6 +273,62 @@ class TestFlaskApp:
         resp = client.post('/api/copy', json={'rating': 1, 'destination': '/tmp'})
         assert resp.status_code == 400
 
+    def test_copy_preserves_subfolder_structure(self, tmp_path, monkeypatch):
+        """Camera folders (100CANON, 101CANON, ...) reset file numbering per
+        folder, so two source subfolders can share a filename. Copy must mirror
+        the subfolder layout into the destination rather than flattening — a
+        flattened copy would silently skip the second file as 'already exists'."""
+        import json
+        import time
+        from fastculler.web import create_app
+        from fastculler import main as main_mod
+
+        src_root = tmp_path / "src"
+        dest = tmp_path / "dest"
+        (src_root / "100CANON").mkdir(parents=True)
+        (src_root / "101CANON").mkdir(parents=True)
+        dest.mkdir()
+
+        f1 = src_root / "100CANON" / "IMG_0001.CR3"
+        f2 = src_root / "101CANON" / "IMG_0001.CR3"
+        f1.touch()
+        f2.touch()
+
+        monkeypatch.setattr(main_mod, 'get_capture_time',
+                             lambda p: '2024:01:01 00:00:01' if '100CANON' in str(p) else '2024:01:01 00:00:02')
+        monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
+        monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
+
+        app = create_app()
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            resp = c.post('/api/start', json={'path': str(src_root)})
+            assert resp.status_code == 200
+
+            deadline = time.monotonic() + 5
+            state = None
+            while time.monotonic() < deadline:
+                r = c.get('/api/state').get_json()
+                if r['status'] == 'ready':
+                    state = r
+                    break
+                if r['status'] == 'error':
+                    pytest.fail(f"Session startup error: {r.get('message')}")
+                time.sleep(0.05)
+            assert state is not None
+            assert state['total'] == 2
+
+            resp = c.post('/api/copy', json={'rating': -1, 'destination': str(dest)})
+            assert resp.status_code == 200
+            lines = [line for line in resp.data.decode().splitlines() if line]
+            final = json.loads(lines[-1])
+            assert final['copied'] == 2
+            assert final['skipped'] == 0
+
+        assert (dest / "100CANON" / "IMG_0001.CR3").exists()
+        assert (dest / "101CANON" / "IMG_0001.CR3").exists()
+
 
 # ── CullerState unit tests ────────────────────────────────────────────────────
 
@@ -293,7 +349,7 @@ class TestCullerState:
         monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
         monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
 
-        state = CullerState(files)
+        state = CullerState(files, tmp_path)
         return state
 
     def test_initial_idx_is_zero(self, state_with_mock_files):
@@ -370,7 +426,7 @@ class TestCullerState:
         # Disable background prefetch workers so the cache starts empty and we control all insertions
         monkeypatch.setattr(CullerState, '_run_prefetch_worker', lambda self, *a: None)
 
-        state = CullerState(files)
+        state = CullerState(files, tmp_path)
         # Access 4 thumbnails — first should be evicted
         for i in range(4):
             state.get_thumbnail(i)
@@ -393,7 +449,7 @@ class TestCullerState:
         # Disable background prefetch workers so the cache starts empty and we control all insertions
         monkeypatch.setattr(CullerState, '_run_prefetch_worker', lambda self, *a: None)
 
-        state = CullerState(files)
+        state = CullerState(files, tmp_path)
         for i in range(4):
             state.get_image(i)
         assert 0 not in state._image_cache

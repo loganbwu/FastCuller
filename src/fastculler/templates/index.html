@@ -110,7 +110,7 @@
         <tr><td class="key-cell">Two-finger swipe</td><td>Pan main image when zoomed in</td></tr>
         <tr><td class="key-cell">Double-click</td><td>Zoom in to point / reset zoom</td></tr>
         <tr><td class="key-cell"><kbd>?</kbd></td><td>Toggle this help</td></tr>
-        <tr><td class="key-cell"><kbd>Esc</kbd></td><td>Close modals / reset zoom / exit fullscreen</td></tr>
+        <tr><td class="key-cell"><kbd>Esc</kbd> / <kbd>Space</kbd></td><td>Reset zoom (Esc also closes modals / exits fullscreen)</td></tr>
       </tbody>
     </table>
     <div class="modal-buttons">
@@ -139,17 +139,39 @@
 
   // Browser-side image preload cache: idx → Image object.
   // Holding a reference keeps the browser's decoded image in memory so display is instant.
+  // Kept bidirectional (not just forward) since left/right are equally likely next moves.
   const _preloadMap = new Map();
-  const PRELOAD_AHEAD = 3;
+  const PRELOAD_AHEAD = 10;
+  const PRELOAD_BEHIND = 10;
 
-  function preloadAhead(fromIdx) {
-    // Evict entries outside the current window to free memory
-    for (const k of _preloadMap.keys()) {
-      if (k <= fromIdx || k > fromIdx + PRELOAD_AHEAD) _preloadMap.delete(k);
+  // For each rating value (0–5), the nearest photo of that rating before and
+  // after fromIdx — so a Left/Right + rating-key jump lands on an already-loaded photo.
+  function nearestRatingIndices(fromIdx) {
+    const targets = new Set();
+    for (let rating = 0; rating <= 5; rating++) {
+      for (const dir of [-1, 1]) {
+        for (let i = fromIdx + dir; i >= 0 && i < _total; i += dir) {
+          if ((_ratings[i] || 0) === rating) { targets.add(i); break; }
+        }
+      }
     }
-    for (let i = 1; i <= PRELOAD_AHEAD; i++) {
+    return targets;
+  }
+
+  function preloadAround(fromIdx) {
+    const keep = new Set();
+    for (let i = -PRELOAD_BEHIND; i <= PRELOAD_AHEAD; i++) {
       const idx = fromIdx + i;
-      if (idx < _total && !_preloadMap.has(idx)) {
+      if (idx >= 0 && idx < _total) keep.add(idx);
+    }
+    for (const idx of nearestRatingIndices(fromIdx)) keep.add(idx);
+
+    // Evict entries outside the kept set to free memory
+    for (const k of _preloadMap.keys()) {
+      if (!keep.has(k)) _preloadMap.delete(k);
+    }
+    for (const idx of keep) {
+      if (idx !== fromIdx && !_preloadMap.has(idx)) {
         const pre = new Image();
         pre.src = `/api/image/${idx}?v=${_sessionVer}`;
         _preloadMap.set(idx, pre);
@@ -205,6 +227,7 @@
 
       if (!_sessionActive) {
         _sessionActive = true;
+        resetZoom();
         document.getElementById('btn-copy').disabled = false;
         buildFilmstrip(data.total);
 
@@ -333,10 +356,12 @@
     updateFilmstripCurrent(idx);
     centreFilmstripOn(idx);
     refreshFilmstripRatings();
-    preloadAhead(idx);
+    preloadAround(idx);
 
     if (forceImageLoad || prevIdx !== idx) {
-      resetZoom();
+      // Zoom/pan intentionally carries over across photos (e.g. checking focus
+      // in the same crop across a burst) — loadMainImage() re-clamps the pan
+      // once the new image's dimensions are known.
       loadMainImage(idx);
     }
   }
@@ -348,27 +373,43 @@
       _mainImageSettledIdx = idx;
       return;
     }
-    if (!_hasShownImage) {
-      showOverlay('Loading...');
-    }
-    const tmp = new Image();
-    tmp.onload = () => {
+
+    const settle = (src) => {
       if (_loadingIdx !== idx) return;
-      img.src = tmp.src;
-      img.setAttribute('data-idx', idx);
+      if (src) {
+        img.src = src;
+        img.setAttribute('data-idx', idx);
+        // Re-clamp the carried-over zoom/pan — the new photo may have a
+        // different aspect ratio, so the old pan offsets could now be out of bounds.
+        clampPan();
+        applyZoomTransform();
+      }
       if (!_hasShownImage) {
         _hasShownImage = true;
         hideOverlay();
       }
+      // Still mark settled on failure — a failed load must not permanently block navigation.
       _mainImageSettledIdx = idx;
     };
-    tmp.onerror = () => {
-      if (_loadingIdx !== idx) return;
-      if (!_hasShownImage) hideOverlay();
-      // Still mark settled — a failed load must not permanently block navigation.
-      _mainImageSettledIdx = idx;
-    };
-    tmp.src = `/api/image/${idx}?v=${_sessionVer}`;
+
+    // If preloadAround() already fetched+decoded this index, swap instantly with
+    // no network/decode wait. Otherwise piggyback on that in-flight request rather
+    // than starting a duplicate one.
+    const preloaded = _preloadMap.get(idx);
+    if (preloaded && preloaded.complete && preloaded.naturalWidth > 0) {
+      settle(preloaded.src);
+      return;
+    }
+
+    if (!_hasShownImage) {
+      showOverlay('Loading...');
+    }
+    const tmp = preloaded || new Image();
+    tmp.onload = () => settle(tmp.src);
+    tmp.onerror = () => settle(null);
+    if (!preloaded) {
+      tmp.src = `/api/image/${idx}?v=${_sessionVer}`;
+    }
   }
 
   function renderRatingSummary() {
@@ -549,6 +590,7 @@
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
     if (e.key === 'Escape' && _zoom > 1) { resetZoomAnimated(); e.preventDefault(); return; }
+    if (e.key === ' ' && _zoom > 1) { resetZoomAnimated(); e.preventDefault(); return; }
 
     // Undo (Cmd+Z / Ctrl+Z)
     if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
@@ -650,6 +692,7 @@
     _ratings[idx] = rating;
     renderRatingSummary();
     updateThumbStars(idx);
+    if (idx === _currentIdx) preloadAround(idx);
 
     const res = await fetch('/api/rate', {
       method: 'POST',

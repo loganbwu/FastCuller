@@ -93,12 +93,58 @@ Existing XMP files are updated in-place; new ones are created if absent.
 
 ## Setup
 
+### First-time setup (no developer tools required)
+
+These steps assume a Mac with nothing developer-related installed yet — no Homebrew, no Python, no git.
+
+1. **Open Terminal.** Press `Cmd + Space`, type `Terminal`, press Enter.
+2. **Install rye** (manages Python for you — no separate Python install needed). Paste this into Terminal and press Enter:
+   ```bash
+   curl -sSf https://rye.astral.sh/get | bash
+   ```
+   Accept the defaults when prompted. When it finishes, close Terminal and reopen it (or run `source "$HOME/.rye/env"`) so the `rye` command is available.
+3. **Get the code.** Either:
+   - **Download ZIP** (easiest): go to https://github.com/loganbwu/FastCuller, click the green `Code` button → `Download ZIP`, then double-click the downloaded file in Finder to unzip it. Note where it lands (usually `~/Downloads/FastCuller-main`).
+   - **Or clone with git** (macOS will prompt you to install Command Line Tools the first time you run `git` — accept and let it install):
+     ```bash
+     git clone https://github.com/loganbwu/FastCuller.git
+     ```
+4. **Move into the project folder** in Terminal. If you downloaded the ZIP:
+   ```bash
+   cd ~/Downloads/FastCuller-main
+   ```
+   If you cloned it:
+   ```bash
+   cd FastCuller
+   ```
+5. **Install dependencies and run:**
+   ```bash
+   rye sync
+   rye run fastculler
+   ```
+   The first `rye sync` will take a minute or two while it downloads Python and the required packages.
+
+The app opens in the browser at `http://localhost:5002`. Leave the Terminal window open while using FastCuller — closing it stops the app.
+
+### Every time after that
+
+Open Terminal, `cd` into the FastCuller folder, then:
+
 ```bash
-rye sync
 rye run fastculler
 ```
 
-The app opens in the browser at `http://localhost:5002`.
+## Usage
+
+Get your CR3 files onto disk in whatever way suits you:
+
+- Copy them off the memory card to your computer or an external hard drive, **or**
+- Leave them on the card and point FastCuller straight at it.
+
+Folder structure is flexible — a common approach is one subfolder per camera (e.g. `R5/`, `R6/`), but any structure works. When you run the app and pick a folder, it searches recursively, so you can select either:
+
+- A specific subfolder (only those photos are loaded), or
+- The top-level folder (all CR3 files in every subfolder are loaded together, sorted by capture time).
 
 ## Roadmap
 

@@ -60,8 +60,9 @@ def _notify_sse():
 class CullerState:
     """All mutable state for one culling session."""
 
-    def __init__(self, files: list):
+    def __init__(self, files: list, root: Path):
         self.files = files                    # list[Path], sorted by capture time
+        self.root = root                      # scanned folder; used to preserve subfolder layout on copy
         self.ratings: dict = {}               # Path → int (0 or 1)
         self.current_idx: int = 0
 
@@ -422,7 +423,7 @@ def create_app() -> Flask:
 
                 app.config["start_stage"] = f"Loading {n} photos..."
                 _notify_sse()
-                state = CullerState(files)
+                state = CullerState(files, root)
                 app.config["culler_state"] = state
                 print(f"  {_GREEN}Session ready.{_RESET}")
             except Exception as e:
@@ -487,7 +488,11 @@ def create_app() -> Flask:
         if state is None or not (0 <= idx < len(state.files)):
             return "", 404
         data = state.get_image(idx)
-        return Response(data, content_type="image/jpeg")
+        return Response(
+            data,
+            content_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     @app.route("/api/thumbnail/<int:idx>")
     def api_thumbnail(idx):
@@ -610,18 +615,24 @@ def create_app() -> Flask:
             errors = []
             for i, src in enumerate(to_copy):
                 try:
-                    dst_path = dest / src.name
+                    # Preserve the folder structure relative to the scanned root
+                    # (e.g. 100CANON/101CANON) — camera folders reset their file
+                    # numbering per-folder, so flattening into one dest dir can
+                    # collide between subfolders that share a filename.
+                    rel = src.relative_to(state.root)
+                    dst_path = dest / rel
                     if dst_path.exists():
-                        print(f"  {_YELLOW}Skipped{_RESET} {src.name}  (already exists)")
+                        print(f"  {_YELLOW}Skipped{_RESET} {rel}  (already exists)")
                         skipped += 1
                     else:
+                        dst_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src, dst_path)
                         xmp = src.with_suffix('.xmp')
                         if xmp.exists():
-                            shutil.copy2(xmp, dest / xmp.name)
-                            print(f"  {_GREEN}Copied{_RESET}  {src.name}  +xmp")
+                            shutil.copy2(xmp, dst_path.with_suffix('.xmp'))
+                            print(f"  {_GREEN}Copied{_RESET}  {rel}  +xmp")
                         else:
-                            print(f"  {_GREEN}Copied{_RESET}  {src.name}")
+                            print(f"  {_GREEN}Copied{_RESET}  {rel}")
                         copied += 1
                 except Exception as e:
                     print(f"  {_RED}Error{_RESET}   {src.name}: {e}")
@@ -668,7 +679,7 @@ def web_main():
     print(f"{_BOLD}{_CYAN}FastCuller{_RESET}  {url}")
     print(f"{_DIM}Select a folder in the browser to begin.  Ctrl-C to quit.{_RESET}\n")
     webbrowser.open(url)
-    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=args.port, debug=False, use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":
