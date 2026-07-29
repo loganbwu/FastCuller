@@ -128,6 +128,26 @@ These steps assume a Mac with nothing developer-related installed yet — no Hom
 
 The app opens in the browser at `http://localhost:5002`. Leave the Terminal window open while using FastCuller — closing it stops the app.
 
+### Troubleshooting: `dyld: ... Symbol not found: ___darwin_check_fd_set_overflow`
+
+If `curl -sSf https://rye.astral.sh/get | bash` fails during "Bootstrapping rye internals" with
+this error, it means the Mac's macOS version is older than what Rye's downloaded Python build
+expects (this is a [known issue](https://github.com/indygreg/python-build-standalone/pull/122)
+with the prebuilt Python binaries Rye uses, not specific to FastCuller). Two fixes:
+
+1. **Update macOS**, if the Mac supports it — check `Apple menu → About This Mac` for the current
+   version and `System Settings → General → Software Update` for available upgrades. This is the
+   simplest fix if available.
+2. **If the Mac can't be upgraded**, skip Rye's bundled Python and point it at a Python installed
+   directly from [python.org](https://www.python.org/downloads/) instead:
+   ```bash
+   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+   cd FastCuller   # or wherever the project folder is
+   rye pin cpython@3.12
+   rye sync
+   ```
+   (Adjust the version number in the path to whatever you installed from python.org.)
+
 ### Every time after that
 
 Open Terminal, `cd` into the FastCuller folder, then:
