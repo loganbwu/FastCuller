@@ -146,15 +146,15 @@ Python binaries Rye uses — nothing wrong with your Mac or with FastCuller itse
 steps instead — they install Python directly from python.org and tell Rye to use that instead of
 downloading its own:
 
-1. **Remove the broken install so we start clean, using Finder (not Terminal, to avoid any risk
-   of a mistyped delete command).**
+1. **Remove just the broken Python download, using Finder (not Terminal, to avoid any risk of a
+   mistyped delete command).** You don't need to remove Rye itself — only the one incomplete
+   Python download it made needs clearing out so it tries again properly.
    - In Finder, click **Go** in the menu bar, then **Go to Folder…** (or press `Cmd + Shift + G`).
-   - Type `~` and press Enter — this opens your Home folder.
-   - Press `Cmd + Shift + .` (period) to reveal hidden files/folders — greyed-out items will
-     appear.
-   - Find the folder named `.rye`, click it once to select it (don't open it), and drag it to the
-     Trash (or press `Cmd + Delete`).
-   - Press `Cmd + Shift + .` again to hide hidden files/folders once more.
+   - Type `~/.rye/py` and press Enter — this opens the folder where Rye stores downloaded Python
+     versions.
+   - There should be exactly one folder inside, with a name starting with `cpython@`. Click it
+     once to select it (don't open it), and drag it to the Trash (or press `Cmd + Delete`). Leave
+     everything else alone.
 2. **Download Python.** Go to [python.org/downloads](https://www.python.org/downloads/) in a
    browser — it should show a yellow **Download Python 3.12.x** button for macOS. Click it.
 3. **Install Python.** Open the file that downloaded (usually in your Downloads folder, named
