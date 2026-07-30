@@ -130,11 +130,11 @@ The app opens in the browser at `http://localhost:5002`. Leave the Terminal wind
 
 ### Troubleshooting: `dyld: ... Symbol not found: ___darwin_check_fd_set_overflow`
 
-If step 2 above fails partway through with an error message containing this text, it means the
-Mac's macOS version is too old for the Python that Rye (or python.org) would normally download —
-current Python installers require **macOS 11 (Big Sur) or later**. This is a limitation of the
-Python binaries themselves, not FastCuller. It shows up on older Macs still running macOS 10.13
-(High Sierra) or earlier that can't be upgraded further.
+If step 2 above fails partway through with an error message containing this text, Rye's own
+installer can't run on this Mac's macOS version — Rye (and current Python installers generally)
+require **macOS 11 (Big Sur) or later**. This isn't a FastCuller problem, and it isn't specific to
+whichever Python version you're offered during setup. It shows up on older Macs still running
+macOS 10.13 (High Sierra) or earlier that can't be upgraded further.
 
 **First, check if the Mac can just be updated to macOS 11 or later** — that's the simplest fix,
 and worth ruling out even if it seems unlikely:
@@ -151,43 +151,48 @@ and worth ruling out even if it seems unlikely:
    and try again from the beginning.
 
 **If no macOS update is available** (common on older hardware — some Macs can't go past a certain
-version), the fix is to install an older Python release that still supports your macOS version,
-and tell Rye to use that instead of downloading its own. The last Python release with an installer
-for macOS this old is **Python 3.9.13** — FastCuller supports running on Python 3.9 for exactly
-this situation, so this fully works, just with an older (and no longer security-patched) Python.
-Two terminal commands handle it, with a "get the code" step in between:
+version), **Rye itself can't be used at all** — the `dyld` error is Rye's own program crashing on
+startup (look for `"$TEMP_FILE" self install` in the error output: that's Rye's own installer
+binary aborting, not a Python it's trying to download). No toolchain setting fixes that, because
+Rye never gets far enough to read it. The fix is to skip Rye completely and run FastCuller with a
+plain Python instead:
 
-1. **In Terminal, paste this and press Enter.** It clears out the one broken Python download Rye
-   made, downloads the correct Python 3.9.13 installer from python.org, installs it, then
-   reinstalls Rye pointed at it:
+1. **Install Python 3.9.13** — the last Python release with an installer for macOS this old.
+   FastCuller supports running on Python 3.9 for exactly this situation. In Terminal, paste this
+   and press Enter:
    ```bash
-   rm -rf ~/.rye/py/cpython@* && \
    curl -sSf -o /tmp/python-3.9.13.pkg https://www.python.org/ftp/python/3.9.13/python-3.9.13-macosx10.9.pkg && \
-   sudo installer -pkg /tmp/python-3.9.13.pkg -target / && \
-   RYE_TOOLCHAIN=/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 curl -sSf https://rye.astral.sh/get | bash && \
-   source "$HOME/.rye/env"
+   sudo installer -pkg /tmp/python-3.9.13.pkg -target /
    ```
-   Partway through, Terminal will show `Password:` and wait — type your Mac's login password (it
-   won't show anything as you type, that's normal for Terminal) and press Enter. This step needs
-   your password because installing Python system-wide requires it, same as double-clicking an
-   installer normally would.
-2. **Get the code and move into the project folder** — follow steps 3 and 4 of Setup above
-   ("Get the code" and "Move into the project folder").
-3. **In Terminal, paste this and press Enter.** It tells the project to use the Python you just
-   installed instead of downloading its own, then installs FastCuller's dependencies and runs it:
+   Terminal will show `Password:` and wait — type your Mac's login password (it won't show
+   anything as you type, that's normal) and press Enter.
+2. **Create a private space for FastCuller's dependencies** (a "virtual environment") using that
+   Python. Paste this and press Enter — it only needs to be done once, ever:
    ```bash
-   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 && \
-   rye pin cpython@3.9.13 && \
-   rye sync && \
-   rye run fastculler
+   /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 -m venv ~/fastculler-env
+   ```
+3. **Get the code and move into the project folder** — follow steps 3 and 4 of Setup above
+   ("Get the code" and "Move into the project folder"). Ignore step 2 (installing Rye) and step 5
+   (`rye sync` / `rye run`) — this fallback replaces both.
+4. **Install FastCuller's dependencies and run it.** From inside the project folder, paste this
+   and press Enter:
+   ```bash
+   source ~/fastculler-env/bin/activate && pip install -e . && fastculler
    ```
 
 ### Every time after that
 
-Open Terminal, `cd` into the FastCuller folder, then:
+**If you set up FastCuller normally with Rye:** open Terminal, `cd` into the FastCuller folder, then:
 
 ```bash
 rye run fastculler
+```
+
+**If you used the Python 3.9 fallback above:** open Terminal, then paste this (adjusting the
+project folder path to wherever you placed it):
+
+```bash
+source ~/fastculler-env/bin/activate && cd ~/Downloads/FastCuller-main && fastculler
 ```
 
 ## Usage
