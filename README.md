@@ -155,30 +155,41 @@ version), **Rye itself can't be used at all** — the `dyld` error is Rye's own 
 startup (look for `"$TEMP_FILE" self install` in the error output: that's Rye's own installer
 binary aborting, not a Python it's trying to download). No toolchain setting fixes that, because
 Rye never gets far enough to read it. The fix is to skip Rye completely and run FastCuller with a
-plain Python instead:
+plain Python instead. This replaces the whole "First-time setup" section above — don't mix the two
+sets of steps together, just follow this list start to finish:
 
-1. **Install Python 3.9.13** — the last Python release with an installer for macOS this old.
-   FastCuller supports running on Python 3.9 for exactly this situation. In Terminal, paste this
+1. **Open Terminal.** Press `Cmd + Space`, type `Terminal`, press Enter.
+2. **Install Python 3.9.13** — the last Python release with an installer for macOS this old.
+   FastCuller supports running on Python 3.9 for exactly this situation. Paste this into Terminal
    and press Enter:
    ```bash
    curl -sSf -o /tmp/python-3.9.13.pkg https://www.python.org/ftp/python/3.9.13/python-3.9.13-macosx10.9.pkg && \
    sudo installer -pkg /tmp/python-3.9.13.pkg -target /
    ```
    Terminal will show `Password:` and wait — type your Mac's login password (it won't show
-   anything as you type, that's normal) and press Enter.
-2. **Create a private space for FastCuller's dependencies** (a "virtual environment") using that
-   Python. Paste this and press Enter — it only needs to be done once, ever:
+   anything as you type, that's normal) and press Enter. The last line printed should say
+   `The install was successful` or `The upgrade was successful`.
+3. **Create a private space for FastCuller's dependencies** (a "virtual environment") using that
+   Python. Paste this and press Enter — it only needs to be done once, ever, even if you run
+   FastCuller many times later:
    ```bash
    /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 -m venv ~/fastculler-env
    ```
-3. **Get the code and move into the project folder** — follow steps 3 and 4 of Setup above
-   ("Get the code" and "Move into the project folder"). Ignore step 2 (installing Rye) and step 5
-   (`rye sync` / `rye run`) — this fallback replaces both.
-4. **Install FastCuller's dependencies and run it.** From inside the project folder, paste this
-   and press Enter:
+4. **Get the code.** Go to https://github.com/loganbwu/FastCuller, click the green `Code` button →
+   `Download ZIP`, then double-click the downloaded file in Finder to unzip it. Note where it lands
+   (usually `~/Downloads/FastCuller-main`).
+5. **Move into the project folder** in Terminal:
+   ```bash
+   cd ~/Downloads/FastCuller-main
+   ```
+6. **Install FastCuller's dependencies and run it.** Paste this and press Enter:
    ```bash
    source ~/fastculler-env/bin/activate && pip install -e . && fastculler
    ```
+   Once it's active, your Terminal prompt will start with `(fastculler-env)` — that confirms it
+   worked. `pip install -e .` will take a minute or so the first time.
+
+The app opens in the browser at `http://localhost:5002`, exactly like the normal setup.
 
 ### Every time after that
 
