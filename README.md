@@ -154,41 +154,33 @@ and worth ruling out even if it seems unlikely:
 version), the fix is to install an older Python release that still supports your macOS version,
 and tell Rye to use that instead of downloading its own. The last Python release with an installer
 for macOS this old is **Python 3.9.13** — FastCuller supports running on Python 3.9 for exactly
-this situation, so this fully works, just with an older (and no longer security-patched) Python:
+this situation, so this fully works, just with an older (and no longer security-patched) Python.
+Two terminal commands handle it, with a "get the code" step in between:
 
-1. **Remove just the broken Python download, using Finder (not Terminal, to avoid any risk of a
-   mistyped delete command).** You don't need to remove Rye itself — only the one incomplete
-   Python download it made needs clearing out so it tries again properly.
-   - In Finder, click **Go** in the menu bar, then **Go to Folder…** (or press `Cmd + Shift + G`).
-   - Type `~/.rye/py` and press Enter — this opens the folder where Rye stores downloaded Python
-     versions.
-   - There should be exactly one folder inside, with a name starting with `cpython@`. Click it
-     once to select it (don't open it), and drag it to the Trash (or press `Cmd + Delete`). Leave
-     everything else alone.
-2. **Download Python 3.9.13.** Go to this page in a browser:
-   https://www.python.org/downloads/release/python-3913/ — scroll down to the "Files" table near
-   the bottom, and click **macOS 64-bit Intel-only installer** (the file is named
-   `python-3.9.13-macosx10.9.pkg`). Don't use the "Download Python 3.9.13" button near the top of
-   the page — that links to a newer-Mac-only installer that won't work here.
-3. **Install Python.** Open the file that downloaded (usually in your Downloads folder) by
-   double-clicking it, then click through the installer: **Continue**, **Continue**, **Agree**,
-   **Install** (enter your Mac password if asked), then **Close**. If a Finder window titled
-   "Python 3.9" pops up afterwards, you can close it.
-4. **Reinstall Rye, telling it to use that Python.** Back in Terminal, paste this and press Enter:
+1. **In Terminal, paste this and press Enter.** It clears out the one broken Python download Rye
+   made, downloads the correct Python 3.9.13 installer from python.org, installs it, then
+   reinstalls Rye pointed at it:
    ```bash
-   RYE_TOOLCHAIN=/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 curl -sSf https://rye.astral.sh/get | bash
+   rm -rf ~/.rye/py/cpython@* && \
+   curl -sSf -o /tmp/python-3.9.13.pkg https://www.python.org/ftp/python/3.9.13/python-3.9.13-macosx10.9.pkg && \
+   sudo installer -pkg /tmp/python-3.9.13.pkg -target / && \
+   RYE_TOOLCHAIN=/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 curl -sSf https://rye.astral.sh/get | bash && \
+   source "$HOME/.rye/env"
    ```
-   This should complete without the `dyld` error this time. Accept the defaults when prompted, as
-   before. When it finishes, close Terminal and reopen it so the `rye` command is available.
-5. **Continue with steps 3 and 4 of Setup above** ("Get the code" and "Move into the project
-   folder") until you're sitting in the FastCuller project folder in Terminal.
-6. **Tell the project to use that same Python**, instead of Rye downloading its own copy. Paste
-   this and press Enter:
+   Partway through, Terminal will show `Password:` and wait — type your Mac's login password (it
+   won't show anything as you type, that's normal for Terminal) and press Enter. This step needs
+   your password because installing Python system-wide requires it, same as double-clicking an
+   installer normally would.
+2. **Get the code and move into the project folder** — follow steps 3 and 4 of Setup above
+   ("Get the code" and "Move into the project folder").
+3. **In Terminal, paste this and press Enter.** It tells the project to use the Python you just
+   installed instead of downloading its own, then installs FastCuller's dependencies and runs it:
    ```bash
-   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9
-   rye pin cpython@3.9.13
+   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 && \
+   rye pin cpython@3.9.13 && \
+   rye sync && \
+   rye run fastculler
    ```
-7. **Now run step 5 of Setup above** (`rye sync` then `rye run fastculler`) as normal.
 
 ### Every time after that
 
