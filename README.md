@@ -131,20 +131,30 @@ The app opens in the browser at `http://localhost:5002`. Leave the Terminal wind
 ### Troubleshooting: `dyld: ... Symbol not found: ___darwin_check_fd_set_overflow`
 
 If step 2 above fails partway through with an error message containing this text, it means the
-Mac's macOS version is older than what Rye's own downloaded Python expects (this is a
-[known issue](https://github.com/indygreg/python-build-standalone/pull/122) with the prebuilt
-Python binaries Rye uses — nothing wrong with your Mac or with FastCuller itself).
+Mac's macOS version is too old for the Python that Rye (or python.org) would normally download —
+current Python installers require **macOS 11 (Big Sur) or later**. This is a limitation of the
+Python binaries themselves, not FastCuller. It shows up on older Macs still running macOS 10.13
+(High Sierra) or earlier that can't be upgraded further.
 
-**First, check if the Mac can just be updated** — that's the simplest fix:
+**First, check if the Mac can just be updated to macOS 11 or later** — that's the simplest fix,
+and worth ruling out even if it seems unlikely:
 
 1. Click the Apple menu (top-left corner) → **About This Mac**, and note the macOS version.
-2. Click the Apple menu → **System Settings** → **General** → **Software Update**.
-3. If an update is offered, install it, restart the Mac, then go back to step 1 of Setup above
+2. Check for an available upgrade:
+   - **macOS 13 (Ventura) or later:** Apple menu → **System Settings** → **General** → **Software
+     Update**.
+   - **macOS 10.14–12 (Mojave through Monterey):** Apple menu → **System Preferences** →
+     **Software Update**.
+   - **macOS 10.13 (High Sierra) or earlier:** open the **App Store** app and click **Updates** in
+     the toolbar.
+3. If a newer macOS is offered, install it, restart the Mac, then go back to step 1 of Setup above
    and try again from the beginning.
 
-**If no macOS update is available** (some older Macs can't be upgraded further), follow these
-steps instead — they install Python directly from python.org and tell Rye to use that instead of
-downloading its own:
+**If no macOS update is available** (common on older hardware — some Macs can't go past a certain
+version), the fix is to install an older Python release that still supports your macOS version,
+and tell Rye to use that instead of downloading its own. The last Python release with an installer
+for macOS this old is **Python 3.9.13** — FastCuller supports running on Python 3.9 for exactly
+this situation, so this fully works, just with an older (and no longer security-patched) Python:
 
 1. **Remove just the broken Python download, using Finder (not Terminal, to avoid any risk of a
    mistyped delete command).** You don't need to remove Rye itself — only the one incomplete
@@ -155,16 +165,18 @@ downloading its own:
    - There should be exactly one folder inside, with a name starting with `cpython@`. Click it
      once to select it (don't open it), and drag it to the Trash (or press `Cmd + Delete`). Leave
      everything else alone.
-2. **Download Python.** Go to [python.org/downloads](https://www.python.org/downloads/) in a
-   browser — it should show a yellow **Download Python 3.12.x** button for macOS. Click it.
-3. **Install Python.** Open the file that downloaded (usually in your Downloads folder, named
-   something like `python-3.12.x-macos11.pkg`) by double-clicking it, then click through the
-   installer: **Continue**, **Continue**, **Agree**, **Install** (enter your Mac password if
-   asked), then **Close**. If a Finder window titled "Python 3.12" pops up afterwards, you can
-   close it.
+2. **Download Python 3.9.13.** Go to this page in a browser:
+   https://www.python.org/downloads/release/python-3913/ — scroll down to the "Files" table near
+   the bottom, and click **macOS 64-bit Intel-only installer** (the file is named
+   `python-3.9.13-macosx10.9.pkg`). Don't use the "Download Python 3.9.13" button near the top of
+   the page — that links to a newer-Mac-only installer that won't work here.
+3. **Install Python.** Open the file that downloaded (usually in your Downloads folder) by
+   double-clicking it, then click through the installer: **Continue**, **Continue**, **Agree**,
+   **Install** (enter your Mac password if asked), then **Close**. If a Finder window titled
+   "Python 3.9" pops up afterwards, you can close it.
 4. **Reinstall Rye, telling it to use that Python.** Back in Terminal, paste this and press Enter:
    ```bash
-   RYE_TOOLCHAIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 curl -sSf https://rye.astral.sh/get | bash
+   RYE_TOOLCHAIN=/Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 curl -sSf https://rye.astral.sh/get | bash
    ```
    This should complete without the `dyld` error this time. Accept the defaults when prompted, as
    before. When it finishes, close Terminal and reopen it so the `rye` command is available.
@@ -173,8 +185,8 @@ downloading its own:
 6. **Tell the project to use that same Python**, instead of Rye downloading its own copy. Paste
    this and press Enter:
    ```bash
-   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-   rye pin cpython@3.12
+   rye toolchain register /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9
+   rye pin cpython@3.9.13
    ```
 7. **Now run step 5 of Setup above** (`rye sync` then `rye run fastculler`) as normal.
 
