@@ -276,6 +276,89 @@ def find_cr3_files(root: Path) -> list:
     return [f for _, f in sorted(zip(times, files), key=lambda x: (x[0], x[1].name))]
 
 
+# ── XMP capture time ──────────────────────────────────────────────────────────
+
+_XMP_DATE_RE = re.compile(r'<exif:DateTimeOriginal>\s*([^<]*?)\s*</exif:DateTimeOriginal>')
+_XMP_DATE_ATTR_RE = re.compile(r'exif:DateTimeOriginal\s*=\s*"([^"]*)"')
+
+
+def read_xmp_capture_time(cr3_path: Path) -> str:
+    """Return exif:DateTimeOriginal from the sidecar as 'YYYY-MM-DD HH:MM:SS', or '' if absent/unreadable.
+
+    Normalises the ISO 'T' separator (as written by Lightroom/ExifTool) to a space
+    to match our own write_xmp_capture_time() output, and drops any timezone or
+    sub-second suffix — only used for relative ordering, so exact precision doesn't
+    matter. Lets callers sort by capture time from the (small, fast-to-read) sidecar
+    instead of re-reading each CR3's embedded EXIF via get_capture_time(), which is
+    accurate but costs a large per-file read. Populate sidecars with the
+    fastculler-write-dates CLI tool, or by exporting from Lightroom/ExifTool.
+    """
+    xmp_path = cr3_path.with_suffix('.xmp')
+    if not xmp_path.exists():
+        return ''
+    try:
+        content = xmp_path.read_text()
+        m = _XMP_DATE_RE.search(content) or _XMP_DATE_ATTR_RE.search(content)
+        if not m:
+            return ''
+        value = m.group(1).strip()
+        if len(value) > 10 and value[10] == 'T':
+            value = value[:10] + ' ' + value[11:19]
+        return value[:19]
+    except Exception:
+        pass
+    return ''
+
+
+def write_xmp_capture_time(cr3_path: Path, capture_time: str) -> bool:
+    """Write exif:DateTimeOriginal to the XMP sidecar alongside the CR3 file.
+
+    capture_time is in EXIF format ('YYYY:MM:DD HH:MM:SS'), as returned by
+    get_capture_time(). Creates the sidecar if absent; otherwise updates the
+    existing tag in-place, preserving all other tags (ratings, crs:* crop data,
+    etc). Returns False without writing if capture_time is empty/malformed.
+    """
+    if len(capture_time) < 19:
+        return False
+    date_str = capture_time[:10].replace(':', '-') + capture_time[10:]
+    date_tag = f'   <exif:DateTimeOriginal>{date_str}</exif:DateTimeOriginal>\n'
+
+    xmp_path = cr3_path.with_suffix('.xmp')
+    if xmp_path.exists():
+        content = xmp_path.read_text()
+
+        # Remove any existing element- or attribute-form date first
+        content = _XMP_DATE_RE.sub('', content)
+        content = _XMP_DATE_ATTR_RE.sub('', content)
+
+        if 'xmlns:exif=' not in content:
+            content = content.replace(
+                '<rdf:Description',
+                '<rdf:Description\n    xmlns:exif="http://ns.adobe.com/exif/1.0/"',
+                1,
+            )
+
+        last_close = content.rfind('</rdf:Description>')
+        if last_close != -1:
+            content = content[:last_close] + date_tag + '  ' + content[last_close:]
+        xmp_path.write_text(content)
+
+    else:
+        xmp_path.write_text(
+            '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+            ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+            '  <rdf:Description rdf:about=""\n'
+            '    xmlns:exif="http://ns.adobe.com/exif/1.0/">\n'
+            + date_tag +
+            '  </rdf:Description>\n'
+            ' </rdf:RDF>\n'
+            '</x:xmpmeta>\n'
+            '<?xpacket end="w"?>'
+        )
+    return True
+
+
 # ── XMP rating ────────────────────────────────────────────────────────────────
 
 _XMP_RATING_RE = re.compile(r'<xmp:Rating>\s*(-?\d+)\s*</xmp:Rating>')

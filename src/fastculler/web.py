@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -16,10 +17,12 @@ from .main import (
     get_exif_info,
     get_preview_jpeg,
     get_thumbnail_jpeg,
+    read_xmp_capture_time,
     read_xmp_rating,
     thumbnail_from_jpeg,
     write_xmp_rating,
 )
+from .thumb_cache import read_cached_thumbnail, write_cached_thumbnail
 
 THUMBNAIL_CACHE_MAX = 100   # max thumbnails kept in memory
 IMAGE_CACHE_MAX = 150       # max full-size images kept in memory
@@ -299,15 +302,32 @@ class CullerState:
         return exif
 
     def _fetch_thumbnail_bytes(self, idx: int) -> bytes:
-        """Derive the thumbnail from an already-cached full preview when possible —
-        much cheaper than reopening the raw file and re-running the CR3/rawpy decode.
-        Falls back to a full decode if the cached bytes can't be read for any reason."""
+        """Produce thumbnail bytes for idx, cheapest source first:
+        1. On-disk cache (persists across restarts and in-memory LRU eviction —
+           see thumb_cache.py).
+        2. Derived from an already-cached full preview — cheaper than reopening
+           the raw file and re-running the CR3/rawpy decode.
+        3. Full decode from the CR3 file.
+        A freshly generated thumbnail is written to the on-disk cache so it's
+        never decoded again."""
+        cr3_path = self.files[idx]
+        cached = read_cached_thumbnail(cr3_path)
+        if cached is not None:
+            return cached
+
         if idx in self._image_cache:
             try:
-                return thumbnail_from_jpeg(self._image_cache[idx])
+                data = thumbnail_from_jpeg(self._image_cache[idx])
             except Exception:
-                pass
-        return get_thumbnail_jpeg(self.files[idx])
+                data = get_thumbnail_jpeg(cr3_path)
+        else:
+            data = get_thumbnail_jpeg(cr3_path)
+
+        try:
+            write_cached_thumbnail(cr3_path, data)
+        except OSError as e:
+            print(f"  {_YELLOW}Couldn't write thumbnail cache for {cr3_path.name}: {e}{_RESET}")
+        return data
 
     def _store_thumb(self, idx: int, data: bytes):
         with self._lock:
@@ -412,14 +432,25 @@ def create_app() -> Flask:
 
                 n = len(raw_files)
 
-                # Sort by file modification time (set by the camera to capture time).
-                # This is essentially instant — one stat() per file, no file reads.
-                # To sort by EXIF capture time instead (slower but more accurate for
-                # files whose mtime was reset during transfer), use find_cr3_files()
-                # from main.py which reads each file's CMT2 box.
-                files = sorted(raw_files, key=lambda f: (f.stat().st_mtime, f.name))
+                # Sort by capture date from the XMP sidecar when one is present — a
+                # small, fast text read, unlike get_capture_time()'s ~12 MB-per-file
+                # CR3 header read. Sidecars are populated via `fastculler-write-dates`,
+                # or by Lightroom/ExifTool. Falls back to file modification time (set
+                # by the camera) for files with no such sidecar — essentially instant,
+                # but wrong if mtime was reset during a file transfer.
+                def _sort_key(f):
+                    xmp_time = read_xmp_capture_time(f)
+                    if xmp_time:
+                        try:
+                            epoch = datetime.strptime(xmp_time, "%Y-%m-%d %H:%M:%S").timestamp()
+                            return (epoch, f.name)
+                        except ValueError:
+                            pass
+                    return (f.stat().st_mtime, f.name)
+
+                files = sorted(raw_files, key=_sort_key)
                 print(f"  {_GREEN}Found {n} CR3 file(s){_RESET}"
-                      f"  {_DIM}sorted by mtime  {files[0].name} … {files[-1].name}{_RESET}")
+                      f"  {_DIM}sorted by capture time  {files[0].name} … {files[-1].name}{_RESET}")
 
                 app.config["start_stage"] = f"Loading {n} photos..."
                 _notify_sse()

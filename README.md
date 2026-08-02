@@ -4,13 +4,15 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 
 ## Features
 
-- Browse CR3 files recursively, sorted by file modification time
+- Browse CR3 files recursively, sorted by capture date (from an XMP sidecar if present, otherwise file modification time)
+- `fastculler-write-dates` CLI tool to pre-populate XMP sidecars with capture date, for fast + accurate sort order on large folders
 - Rate photos with 0–5 stars (written to XMP sidecar files)
 - Filmstrip view with star overlays and natural aspect ratio thumbnails
 - Rating summary in the header (count per star tier)
 - EXIF metadata overlay on main image (ISO, shutter, aperture, focal length, lens)
 - Keyboard shortcuts for efficient culling
 - Background prefetch of images and thumbnails, with in-memory LRU caching
+- On-disk thumbnail cache (persists across restarts) + `fastculler-build-thumbnails` CLI tool to pre-generate all of them for a large library
 - Copy rated photos (and XMP files) to a chosen destination
 - Export XMP sidecar files only (no photos), preserving folder structure — useful for merging a collaborator's ratings into your own copy of the same photos
 - Fullscreen mode (button or `F` key)
@@ -50,13 +52,18 @@ Zoom resets automatically when navigating to a different photo.
 
 ```
 src/fastculler/
-├── main.py        CR3 image reading, capture time, XMP rating read/write
+├── main.py        CR3 image reading, capture time, XMP rating/capture-time read/write
 ├── web.py         Flask app, CullerState, prefetch, API routes
+├── thumb_cache.py On-disk thumbnail cache
+├── xmp_cli.py     fastculler-write-dates CLI tool
+├── thumb_cli.py   fastculler-build-thumbnails CLI tool
+├── cli_progress.py  Shared terminal progress bar for the CLI tools
 ├── templates/
 │   └── index.html Folder picker screen, header, main panel, filmstrip
 └── static/
     └── style.css  Dark UI (based on AutoCropper)
 tests/
+├── conftest.py    Sandboxes the on-disk thumbnail cache for the whole test run
 └── test_main.py   Unit tests for image and XMP functions
 ```
 
@@ -83,6 +90,33 @@ The server prefetches images and thumbnails in the background, prioritizing the 
 photo, then nearby photos in sequence, then 0- and 1-star neighbours — so navigation
 stays responsive even when flicking through many photos quickly.
 
+## Thumbnail Cache
+
+Generating a filmstrip thumbnail means decoding a CR3's embedded JPEG — cheap for one
+photo, expensive across a library of tens of thousands. On top of the in-memory LRU
+cache (bounded, cleared on restart), FastCuller also caches every generated thumbnail
+on disk at `~/Library/Caches/FastCuller/thumbnails/`, keyed by each photo's path and
+modification time. Once a thumbnail's been generated once — through normal use, or by
+running:
+
+```bash
+fastculler-build-thumbnails ~/Photos/2024-06-14-shoot
+```
+
+— it's never decoded again, regardless of restarts or how far you scroll the filmstrip.
+Replacing or reprocessing a CR3 changes its modification time, so its old cached
+thumbnail is naturally skipped rather than served stale.
+
+There's no automatic cleanup — the cache only grows as you cull more folders (roughly
+10 KB per photo). That's intentional: it's ordinary cache data, safe to delete any time
+(FastCuller regenerates whatever's missing), and `~/Library/Caches` is exactly the
+location macOS's own storage-management tools already know to treat as reclaimable. If
+you ever want to reclaim the space yourself:
+
+```bash
+rm -rf ~/Library/Caches/FastCuller
+```
+
 ## XMP Rating Format
 
 Ratings are written as `xmp:Rating` in a standard XMP sidecar (`.xmp`) alongside the CR3 file:
@@ -92,6 +126,38 @@ Ratings are written as `xmp:Rating` in a standard XMP sidecar (`.xmp`) alongside
 ```
 
 Existing XMP files are updated in-place; new ones are created if absent.
+
+## XMP Capture Time Format
+
+Capture date is written as `exif:DateTimeOriginal` in the same XMP sidecar:
+
+```xml
+<exif:DateTimeOriginal>2024-06-14 10:30:45</exif:DateTimeOriginal>
+```
+
+Reading also understands the ISO `T` separator (e.g. `2024-06-14T10:30:45`), as written by
+Lightroom or ExifTool, so a sidecar tagged by those tools sorts correctly too.
+
+## Sorting by Capture Date
+
+FastCuller sorts photos by capture date. For each file it checks, in order:
+
+1. **XMP sidecar** — `exif:DateTimeOriginal`, a small, fast text read.
+2. **File modification time** — instant, but wrong if mtimes were reset during a file transfer
+   (e.g. copying from a memory card with software that doesn't preserve them).
+
+Reading the true EXIF capture date straight from a CR3 file is accurate but slow (~12 MB read
+per file), so FastCuller doesn't do that automatically on every load. Instead, run the
+`fastculler-write-dates` CLI tool once per folder to cache each photo's capture date into its
+XMP sidecar — after that, loading the folder sorts correctly without the per-file cost:
+
+```bash
+fastculler-write-dates ~/Photos/2024-06-14-shoot
+```
+
+Files that already have a cached capture date are skipped by default; pass `--force` to
+re-tag them (e.g. after the CR3s themselves changed). Files with no readable EXIF capture
+time are left alone and fall back to mtime sorting as before.
 
 ## Setup
 
@@ -218,6 +284,30 @@ Folder structure is flexible — a common approach is one subfolder per camera (
 - A specific subfolder (only those photos are loaded), or
 - The top-level folder (all CR3 files in every subfolder are loaded together, sorted by capture time).
 
+### Getting accurate sort order for a new folder
+
+FastCuller sorts by file modification time unless a photo's XMP sidecar already has a capture
+date cached — and mtime can be wrong if it was reset while copying files off a card. Before
+culling a folder for the first time, run `fastculler-write-dates` on it once to cache the real
+EXIF capture date into each photo's `.xmp` sidecar:
+
+```bash
+rye run fastculler-write-dates ~/Photos/2024-06-14-shoot
+```
+
+(Drop `rye run` if you used the Python 3.9 fallback setup — just `fastculler-write-dates ...`
+with the same environment activated as when you run `fastculler`.)
+
+### Pre-warming thumbnails for a large folder
+
+For a folder large enough that scrolling the filmstrip visibly waits on thumbnails
+decoding, run `fastculler-build-thumbnails` on it once — after that, every thumbnail
+loads instantly regardless of library size (see [Thumbnail Cache](#thumbnail-cache)):
+
+```bash
+rye run fastculler-build-thumbnails ~/Photos/2024-06-14-shoot
+```
+
 ### Sharing ratings with a collaborator
 
 If a collaborator has their own copy of the same folder hierarchy (e.g. synced separately rather
@@ -258,5 +348,8 @@ than sent to you directly), they don't need to send you the photos back — just
 - [x] Thumbnail prefetch
 - [x] Smooth, responsive filmstrip and navigation under rapid input
 - [x] Export XMP sidecars only, preserving folder structure
+- [x] Jump to a specific photo by number (click the progress counter)
+- [x] `fastculler-write-dates` CLI tool + sort by XMP capture date, falling back to mtime
+- [x] On-disk thumbnail cache + `fastculler-build-thumbnails` CLI tool
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)
