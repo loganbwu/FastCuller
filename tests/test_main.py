@@ -397,6 +397,31 @@ class TestReadTiffTag:
         assert _read_tiff_tag(b'', 274) is None
 
 
+# ── Parallel scan-with-progress tests ─────────────────────────────────────────
+
+class TestMapWithProgress:
+    def test_returns_dict_keyed_by_input(self):
+        from fastculler.web import _map_with_progress
+
+        results = _map_with_progress(['a', 'b', 'c'], lambda f: f.upper(), lambda done, total: None)
+        assert results == {'a': 'A', 'b': 'B', 'c': 'C'}
+
+    def test_reports_final_progress(self):
+        from fastculler.web import _map_with_progress
+
+        calls = []
+        _map_with_progress([1, 2, 3, 4, 5], lambda f: f * 2, lambda done, total: calls.append((done, total)))
+        assert calls[-1] == (5, 5)
+        assert all(total == 5 for _, total in calls)
+
+    def test_empty_input(self):
+        from fastculler.web import _map_with_progress
+
+        calls = []
+        assert _map_with_progress([], lambda f: f, lambda done, total: calls.append((done, total))) == {}
+        assert calls == []  # no progress callback for zero files
+
+
 # ── Flask app integration tests ───────────────────────────────────────────────
 
 class TestFlaskApp:
@@ -468,6 +493,52 @@ class TestFlaskApp:
             assert state['filename'].endswith('.cr3')
             assert isinstance(state['current_idx'], int)
 
+    def test_start_reports_progress_during_loading_stage(self, tmp_path, monkeypatch):
+        """The 'starting' status must include progress/total once real work is
+        underway, so the frontend can render an actual loading bar rather than
+        a static message — see _map_with_progress."""
+        import threading
+        import time
+        from fastculler.web import create_app
+
+        for i in range(5):
+            (tmp_path / f"photo_{i:03d}.cr3").touch()
+
+        release = threading.Event()
+
+        def blocked_rating(path):
+            release.wait(timeout=2)
+            return 0
+
+        monkeypatch.setattr('fastculler.web.read_xmp_rating', blocked_rating)
+        monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
+        monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
+
+        app = create_app()
+        app.config["TESTING"] = True
+        try:
+            with app.test_client() as c:
+                resp = c.post('/api/start', json={'path': str(tmp_path)})
+                assert resp.status_code == 200
+
+                deadline = time.monotonic() + 2
+                seen_loading_stage = None
+                while time.monotonic() < deadline:
+                    r = c.get('/api/state').get_json()
+                    if r['status'] == 'starting' and r.get('stage', '').startswith('Loading'):
+                        seen_loading_stage = r
+                        break
+                    if r['status'] in ('ready', 'error'):
+                        break
+                    time.sleep(0.02)
+
+                assert seen_loading_stage is not None, "never observed the Loading-stage progress fields"
+                assert seen_loading_stage['total'] == 5
+                assert 'progress' in seen_loading_stage
+        finally:
+            release.set()
+
     def test_start_sorts_by_xmp_capture_time_over_mtime(self, tmp_path):
         """A photo whose file mtime is out of order (e.g. reset during transfer)
         should still sort correctly if its XMP sidecar has a capture date."""
@@ -519,6 +590,37 @@ class TestFlaskApp:
     def test_thumbnail_without_session(self, client):
         resp = client.get('/api/thumbnail/0')
         assert resp.status_code == 404
+
+    def test_filenames_without_session(self, client):
+        resp = client.get('/api/filenames')
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    def test_filenames_with_session(self, tmp_path, monkeypatch):
+        import time
+        from fastculler.web import create_app
+
+        for i in range(3):
+            (tmp_path / f"photo_{i:03d}.cr3").touch()
+
+        monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
+        monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
+
+        app = create_app()
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            c.post('/api/start', json={'path': str(tmp_path)})
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if c.get('/api/state').get_json()['status'] == 'ready':
+                    break
+                time.sleep(0.05)
+
+            resp = c.get('/api/filenames')
+            assert resp.status_code == 200
+            names = resp.get_json()
+            assert sorted(names) == ['photo_000.cr3', 'photo_001.cr3', 'photo_002.cr3']
 
     def test_copy_without_session(self, client):
         resp = client.post('/api/copy', json={'rating': 1, 'destination': '/tmp'})
@@ -744,6 +846,40 @@ class TestCullerState:
         assert len(s['ratings']) == 5
         assert 'current_idx' in s
         assert 'prefetch_ready' in s
+
+    def test_n_with_rating_respects_search_limit(self, tmp_path, monkeypatch):
+        """Prefetch's rated-neighbour search must not jump arbitrarily far away
+        in a sparsely-rated library — see PREFETCH_RATING_SEARCH_LIMIT."""
+        from fastculler.web import CullerState
+        from fastculler import web as web_module
+
+        files = []
+        for i in range(10):
+            p = tmp_path / f"photo_{i:03d}.cr3"
+            p.touch()
+            files.append(p)
+
+        monkeypatch.setattr('fastculler.web.get_preview_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 10)
+        monkeypatch.setattr('fastculler.web.get_thumbnail_jpeg', lambda p, **kw: b'\xff\xd8\xff' + b'\x00' * 5)
+        monkeypatch.setattr('fastculler.web.get_exif_info', lambda p: {})
+        monkeypatch.setattr(web_module, 'PREFETCH_RATING_SEARCH_LIMIT', 3)
+        monkeypatch.setattr(CullerState, '_run_prefetch_worker', lambda self, *a: None)
+
+        state = CullerState(files, tmp_path)
+        state.ratings[state.files[9]] = 1
+        assert state._n_with_rating(0, 1, 1, 10) == []  # beyond the search limit
+
+        state.ratings[state.files[2]] = 1
+        assert state._n_with_rating(0, 1, 1, 10) == [2]  # within it
+
+    def test_prefetch_deferred_until_first_get_image(self, state_with_mock_files):
+        """Background prefetch must not start competing with the client's own
+        requests before the client has made any — it should only kick in once
+        the first real photo has actually been requested."""
+        state = state_with_mock_files
+        assert state._prefetch_started is False
+        state.get_image(0)
+        assert state._prefetch_started is True
 
     def test_get_image_returns_bytes(self, state_with_mock_files):
         data = state_with_mock_files.get_image(0)

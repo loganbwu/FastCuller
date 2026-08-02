@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +31,7 @@ PREFETCH_WINDOW = 10        # sequential backward and per-rating neighbours to p
 PREFETCH_FORWARD = 50       # sequential forward neighbours to prefetch
 PREFETCH_WORKERS = 4        # persistent full-image prefetch worker threads
 THUMB_PREFETCH_WORKERS = 2  # persistent thumbnail prefetch worker threads
+PREFETCH_RATING_SEARCH_LIMIT = 500  # max distance to search for a rated neighbour to prefetch
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -58,12 +60,46 @@ def _notify_sse():
         _sse_condition.notify_all()
 
 
+# ── Parallel file scanning with progress ──────────────────────────────────────
+
+def _map_with_progress(files: list, worker_fn, on_progress, max_workers: int = 8) -> dict:
+    """Run worker_fn(file) for every file in a thread pool, returning a
+    {file: result} dict.
+
+    Used for the per-file I/O work at folder-load time (capture-time sort key,
+    XMP rating read) — each file needs only a small stat()/read(), which
+    parallelizes well, and a large library otherwise means a multi-second
+    single-threaded scan before the UI shows anything.
+
+    Calls on_progress(done, total) roughly every 1% of files completed (every
+    file, for a small library) — not on every single completion, which would
+    flood the SSE stream for a library with tens of thousands of photos.
+    """
+    n = len(files)
+    if n == 0:
+        return {}
+    results = {}
+    done = 0
+    last_reported = 0
+    report_every = max(1, n // 100)
+    with ThreadPoolExecutor(max_workers=min(max_workers, n)) as pool:
+        futures = {pool.submit(worker_fn, f): f for f in files}
+        for future in as_completed(futures):
+            f = futures[future]
+            results[f] = future.result()
+            done += 1
+            if done - last_reported >= report_every or done == n:
+                last_reported = done
+                on_progress(done, n)
+    return results
+
+
 # ── Session state ─────────────────────────────────────────────────────────────
 
 class CullerState:
     """All mutable state for one culling session."""
 
-    def __init__(self, files: list, root: Path):
+    def __init__(self, files: list, root: Path, progress_callback=None):
         self.files = files                    # list[Path], sorted by capture time
         self.root = root                      # scanned folder; used to preserve subfolder layout on copy
         self.ratings: dict = {}               # Path → int (0 or 1)
@@ -75,6 +111,7 @@ class CullerState:
         self._thumb_cache: dict = {}          # idx → bytes (thumbnail JPEG)
         self._thumb_order: list = []          # insertion order for LRU eviction
         self._lock = threading.Lock()
+        self._prefetch_started = False        # set on the first get_image() call — see get_image()
 
         # Prefetch: persistent workers that always pick the highest-priority
         # (closest to current_idx) not-yet-cached index. Unlike a FIFO task
@@ -103,18 +140,24 @@ class CullerState:
                 daemon=True,
             ).start()
 
-        # Load existing ratings from XMP sidecars
+        # Load existing ratings from XMP sidecars — parallelized the same way
+        # as the capture-time sort (see _map_with_progress), for the same reason.
         pre_rated = 0
-        for path in files:
-            r = read_xmp_rating(path)
+        results = _map_with_progress(files, read_xmp_rating, progress_callback or (lambda done, total: None))
+        for path, r in results.items():
             if r != 0:
                 self.ratings[path] = r
                 pre_rated += 1
         if pre_rated:
             print(f"  {_CYAN}Loaded existing ratings: {pre_rated} file(s) already rated{_RESET}")
 
-        # Kick off initial prefetch
-        self._trigger_prefetch(self.current_idx)
+        # Prefetch workers are started above but stay parked on their condition
+        # variables until _trigger_prefetch() is called — deliberately not done
+        # here. Starting it immediately would have background prefetch compete
+        # for I/O/decode time against the client's own first image request,
+        # which hasn't even been made yet at this point (this constructor is
+        # still running on the server before the client ever sees "ready").
+        # get_image() fires the first trigger once that request actually lands.
 
     # ── Navigation helpers ────────────────────────────────────────────────────
 
@@ -131,14 +174,26 @@ class CullerState:
         return -1
 
     def _n_with_rating(self, start: int, rating: int, direction: int, count: int) -> list:
-        """Return up to `count` indices in `direction` whose rating matches."""
+        """Return up to `count` indices within PREFETCH_RATING_SEARCH_LIMIT of
+        start, in `direction`, whose rating matches.
+
+        Used only for prefetch prioritization (see _prefetch_indices) — unlike
+        _next_with_rating (the Left/Right + rating-key navigation shortcut,
+        where an unbounded search is exactly what the user asked for), an
+        unbounded search here is a background optimization that can otherwise
+        jump tens of thousands of photos away to the nearest stray rated photo
+        in a sparsely-rated library, wastefully prefetching something nowhere
+        near what the user is actually about to look at.
+        """
         n = len(self.files)
         results = []
         idx = start + direction
-        while 0 <= idx < n and len(results) < count:
+        steps = 0
+        while 0 <= idx < n and len(results) < count and steps < PREFETCH_RATING_SEARCH_LIMIT:
             if self.ratings.get(self.files[idx], 0) == rating:
                 results.append(idx)
             idx += direction
+            steps += 1
         return results
 
     def navigate(self, idx: int) -> bool:
@@ -282,15 +337,22 @@ class CullerState:
 
     def get_image(self, idx: int) -> bytes:
         if idx in self._image_cache:
-            return self._image_cache[idx]
-        # On-demand load on cache miss
-        data = get_preview_jpeg(self.files[idx])
-        with self._lock:
-            self._image_order.append(idx)
-            if len(self._image_order) > IMAGE_CACHE_MAX:
-                evict = self._image_order.pop(0)
-                self._image_cache.pop(evict, None)
-            self._image_cache[idx] = data
+            data = self._image_cache[idx]
+        else:
+            # On-demand load on cache miss
+            data = get_preview_jpeg(self.files[idx])
+            with self._lock:
+                self._image_order.append(idx)
+                if len(self._image_order) > IMAGE_CACHE_MAX:
+                    evict = self._image_order.pop(0)
+                    self._image_cache.pop(evict, None)
+                self._image_cache[idx] = data
+
+        # First real request for a photo — only now start background prefetch,
+        # so it never competes with this (or any earlier) client-facing request.
+        if not self._prefetch_started:
+            self._prefetch_started = True
+            self._trigger_prefetch(self.current_idx)
         return data
 
     def get_exif(self, idx: int) -> dict:
@@ -416,7 +478,14 @@ def create_app() -> Flask:
         app.config["culler_state"] = None
         app.config["start_error"] = None
         app.config["start_stage"] = "Scanning folder..."
+        app.config["start_progress"] = 0
+        app.config["start_progress_total"] = 0
         _notify_sse()
+
+        def _report_progress(done, total):
+            app.config["start_progress"] = done
+            app.config["start_progress_total"] = total
+            _notify_sse()
 
         def _do_start():
             try:
@@ -448,13 +517,20 @@ def create_app() -> Flask:
                             pass
                     return (f.stat().st_mtime, f.name)
 
-                files = sorted(raw_files, key=_sort_key)
+                # Parallelized (each key needs only a small stat()/read()) with
+                # progress reported to the "Scanning folder..." loading bar —
+                # a single-threaded scan of a large library would otherwise
+                # leave the UI on a static message for several seconds.
+                keys = _map_with_progress(raw_files, _sort_key, _report_progress)
+                files = sorted(raw_files, key=lambda f: keys[f])
                 print(f"  {_GREEN}Found {n} CR3 file(s){_RESET}"
                       f"  {_DIM}sorted by capture time  {files[0].name} … {files[-1].name}{_RESET}")
 
                 app.config["start_stage"] = f"Loading {n} photos..."
+                app.config["start_progress"] = 0
+                app.config["start_progress_total"] = n
                 _notify_sse()
-                state = CullerState(files, root)
+                state = CullerState(files, root, progress_callback=_report_progress)
                 app.config["culler_state"] = state
                 print(f"  {_GREEN}Session ready.{_RESET}")
             except Exception as e:
@@ -477,7 +553,12 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": error})
         stage = app.config.get("start_stage")
         if stage:
-            return jsonify({"status": "starting", "stage": stage})
+            return jsonify({
+                "status": "starting",
+                "stage": stage,
+                "progress": app.config.get("start_progress", 0),
+                "total": app.config.get("start_progress_total", 0),
+            })
         state = app.config["culler_state"]
         if state is None:
             return jsonify({"status": "waiting"})
@@ -492,7 +573,12 @@ def create_app() -> Flask:
                 return {"status": "error", "message": error}
             stage = app.config.get("start_stage")
             if stage:
-                return {"status": "starting", "stage": stage}
+                return {
+                    "status": "starting",
+                    "stage": stage,
+                    "progress": app.config.get("start_progress", 0),
+                    "total": app.config.get("start_progress_total", 0),
+                }
             state = app.config["culler_state"]
             if state is None:
                 return {"status": "waiting"}
@@ -540,6 +626,13 @@ def create_app() -> Flask:
         if state is None or not (0 <= idx < len(state.files)):
             return jsonify({}), 200
         return jsonify(state.get_exif(idx))
+
+    @app.route("/api/filenames")
+    def api_filenames():
+        state = app.config["culler_state"]
+        if state is None:
+            return jsonify([]), 200
+        return jsonify([f.name for f in state.files])
 
     # ── Navigation & rating ────────────────────────────────────────────────
 

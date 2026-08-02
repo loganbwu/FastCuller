@@ -33,6 +33,7 @@
   </div>
   <div id="header-right">
     <button class="btn-secondary" id="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
+    <button class="btn-secondary" id="btn-gallery" onclick="openGallery()" disabled>Gallery</button>
     <button class="btn-secondary" onclick="showPicker()">Change Folder</button>
     <button class="btn-secondary" id="btn-export-xmp" onclick="openExportXmpModal()" disabled>Export XMP</button>
     <button class="btn-primary" id="btn-copy" onclick="openCopyModal()" disabled>Copy Photos</button>
@@ -46,13 +47,31 @@
     <div class="spinner"></div>
     <div id="overlay-title">Loading...</div>
     <div id="overlay-sub"></div>
+    <div id="overlay-progress-bar" style="display:none">
+      <div id="overlay-progress-bar-fill"></div>
+    </div>
   </div>
   <div id="exif-bar"></div>
 </div>
 
 <!-- ── Filmstrip ── -->
 <div id="filmstrip-wrap">
-  <div id="filmstrip"></div>
+  <div id="filmstrip">
+    <div id="filmstrip-spacer"></div>
+  </div>
+</div>
+
+<!-- ── Gallery grid view ── -->
+<div id="gallery-overlay" class="hidden">
+  <div id="gallery-toolbar">
+    <div id="gallery-title">Gallery</div>
+    <button class="btn-secondary" onclick="closeGallery()">Close</button>
+  </div>
+  <div id="gallery-viewport">
+    <div id="gallery-spacer">
+      <div id="gallery-pool"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ── Copy modal ── -->
@@ -127,6 +146,7 @@
         <tr><td class="key-cell"><kbd>End</kbd></td><td>Jump to last unrated photo</td></tr>
         <tr><td class="key-cell"><kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>Undo last rating</td></tr>
         <tr><td class="key-cell"><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
+        <tr><td class="key-cell"><kbd>G</kbd></td><td>Toggle gallery grid view</td></tr>
         <tr><td class="key-cell">Pinch / <kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + scroll</td><td>Zoom main image in/out</td></tr>
         <tr><td class="key-cell">Two-finger swipe</td><td>Pan main image when zoomed in</td></tr>
         <tr><td class="key-cell">Double-click</td><td>Zoom in to point / reset zoom</td></tr>
@@ -234,7 +254,7 @@
       return;
     }
     if (data.status === 'starting') {
-      showOverlay('Loading...', data.stage || '');
+      showOverlay('Loading...', data.stage || '', { done: data.progress || 0, total: data.total || 0 });
       return;
     }
     if (data.status === 'waiting') {
@@ -245,14 +265,18 @@
       _total = data.total;
       _ratings = data.ratings || [];
       _prefetchReady = data.prefetch_ready || [];
-      updatePrefetchIndicators();
 
       if (!_sessionActive) {
         _sessionActive = true;
         resetZoom();
         document.getElementById('btn-copy').disabled = false;
         document.getElementById('btn-export-xmp').disabled = false;
-        buildFilmstrip(data.total);
+        document.getElementById('btn-gallery').disabled = false;
+        buildFilmstrip();
+
+        // Fetched once per session (filenames never change while a folder is
+        // open) — used for the gallery's filename captions.
+        fetch('/api/filenames').then(r => r.json()).then(names => { _filenames = names; });
 
         // Restore saved position for this folder
         let startIdx = data.current_idx;
@@ -283,7 +307,7 @@
           document.getElementById('filename').textContent = data.filename;
         }
         renderRatingSummary();
-        refreshFilmstripRatings();
+        renderFilmWindow();
       }
     }
   }
@@ -304,6 +328,7 @@
   }
 
   async function startWithPath(path) {
+    closeGallery();
     document.getElementById('btn-pick').disabled = true;
     document.getElementById('picker-sub').textContent = 'Loading...';
     document.getElementById('picker-error').textContent = '';
@@ -316,10 +341,11 @@
     _hasShownImage = false;
     _state = null;
     _ratings = [];
+    _filenames = [];
     _ratingHistory.length = 0;
     document.getElementById('btn-copy').disabled = true;
     document.getElementById('btn-export-xmp').disabled = true;
-    document.getElementById('filmstrip').innerHTML = '';
+    document.getElementById('btn-gallery').disabled = true;
     document.getElementById('exif-bar').innerHTML = '';
 
     showOverlay('Scanning folder...');
@@ -332,6 +358,7 @@
   }
 
   function showPicker() {
+    closeGallery();
     if (_es) { _es.close(); _es = null; }
     clearTimeout(_sseReconnectTimer);
     _sessionActive = false;
@@ -343,12 +370,21 @@
     hideOverlay();
   }
 
-  function showOverlay(title, sub) {
+  function showOverlay(title, sub, progress) {
     const overlay = document.getElementById('overlay');
     overlay.classList.remove('hidden');
     document.getElementById('overlay-title').textContent = title || 'Loading...';
     document.getElementById('overlay-sub').textContent = sub || '';
     overlay.querySelector('.spinner').style.display = '';
+
+    const bar = document.getElementById('overlay-progress-bar');
+    if (progress && progress.total > 0) {
+      bar.style.display = '';
+      const pct = Math.min(100, Math.round(100 * progress.done / progress.total));
+      document.getElementById('overlay-progress-bar-fill').style.width = `${pct}%`;
+    } else {
+      bar.style.display = 'none';
+    }
   }
 
   function hideOverlay() {
@@ -395,9 +431,18 @@
     }
 
     fetchExif(idx);
-    updateFilmstripCurrent(idx);
     centreFilmstripOn(idx);
-    refreshFilmstripRatings();
+    renderFilmWindow();
+    // Immediate, not debounced: a navigation step is a single deliberate photo
+    // change, not a continuous scroll gesture passing through transient
+    // positions — the debounce exists for the scroll-event path (see
+    // scheduleFilmRender) so a fast manual drag of the strip doesn't fire a
+    // burst of fetches for positions already scrolled past. Debouncing this
+    // path too meant rapid repeated navigation (holding an arrow key) kept
+    // resetting the same timer — via both this call and the scroll events the
+    // centring animation itself fires — so thumbnails never got a chance to
+    // load until the user stopped and waited.
+    loadFilmImages();
     preloadAround(idx);
   }
 
@@ -419,11 +464,12 @@
         clampPan();
         applyZoomTransform();
       }
+      // On failure, leave it blank (see below) rather than the previous photo —
+      // still mark settled so a failed load doesn't permanently block navigation.
       if (!_hasShownImage) {
         _hasShownImage = true;
         hideOverlay();
       }
-      // Still mark settled on failure — a failed load must not permanently block navigation.
       _mainImageSettledIdx = idx;
     };
 
@@ -436,13 +482,26 @@
       return;
     }
 
+    // Blank immediately rather than leaving the previous photo on screen while
+    // this one loads — showing a different, stale photo reads as a bug, not a
+    // loading state (no src/no intrinsic size collapses #main-img to nothing,
+    // showing #main-panel's dark background through it).
+    img.removeAttribute('src');
+    img.removeAttribute('data-idx');
+
     if (!_hasShownImage) {
       showOverlay('Loading...');
     }
-    const tmp = preloaded || new Image();
+    // Only piggyback on `preloaded` if it's still actually in flight — one that
+    // already finished and failed (naturalWidth 0, caught by the check above)
+    // will never fire a new load/error event no matter how many handlers get
+    // attached to it, so retry with a fresh Image() instead of getting stuck
+    // waiting forever on a dead object.
+    const stillLoading = preloaded && !preloaded.complete;
+    const tmp = stillLoading ? preloaded : new Image();
     tmp.onload = () => settle(tmp.src);
     tmp.onerror = () => settle(null);
-    if (!preloaded) {
+    if (!stillLoading) {
       tmp.src = `/api/image/${idx}?v=${_sessionVer}`;
     }
   }
@@ -616,6 +675,14 @@
       return;
     }
 
+    // Gallery grid view: block every other key (it's a DOM overlay on the same
+    // page, not a separate context — without this, rating/navigate/undo keys
+    // would silently act on the hidden single-photo view underneath).
+    if (_galleryOpen) {
+      if (e.key === 'Escape' || e.key === 'g' || e.key === 'G') { closeGallery(); e.preventDefault(); }
+      return;
+    }
+
     // Copy modal: Escape to close
     if (document.querySelector('#copy-modal-backdrop:not(.hidden)')) {
       if (e.key === 'Escape') closeCopyModal();
@@ -644,6 +711,7 @@
     if (e.key === 'ArrowRight') { _held.right = true; e.preventDefault(); }
 
     if (e.key === '?') { openHelpModal(); e.preventDefault(); return; }
+    if (e.key === 'g' || e.key === 'G') { openGallery(); e.preventDefault(); return; }
 
     if (e.key === 'Home') {
       e.preventDefault();
@@ -738,11 +806,14 @@
     document.getElementById('progress').textContent = _total > 0 ? `${_currentIdx + 1} / ${_total}` : '';
   }
 
-  async function navigate(idx) {
+  async function navigate(idx, force) {
     if (idx < 0 || idx >= _total) return;
     // Holding an arrow key auto-repeats far faster than a raw-photo decode can keep up —
     // don't let the index race ahead of what's actually been loaded and displayed.
-    if (!mainImageCaughtUp()) return;
+    // A gallery tile click passes force=true: it's a single deliberate action, not a
+    // repeat, so it must never silently no-op just because the previous photo hasn't
+    // settled yet — the gallery gives no other feedback that the click did nothing.
+    if (!force && !mainImageCaughtUp()) return;
     setCurrentIdx(idx, true);
     await fetch('/api/navigate', {
       method: 'POST',
@@ -816,177 +887,208 @@
   }
 
   // ── Filmstrip ──────────────────────────────────────────────────────────────
+  //
+  // Same virtualized recycled-pool approach as the gallery grid: a small pool
+  // of DOM nodes repositioned by arithmetic from scrollLeft, rather than one
+  // permanent node per photo — bounded memory regardless of library size, and
+  // no more per-item aspect-ratio measuring now that tiles are a fixed square.
+  // Centering uses native `scroll-behavior: smooth` instead of a hand-rolled
+  // requestAnimationFrame tween — simpler, at the cost of not knowing exactly
+  // when a glide finishes, but a rapid next navigation just retargets the
+  // native smooth-scroll, which browsers already handle gracefully.
 
-  const _thumbLoaded = new Set();
-  let _filmstripReady = false;  // false until the first centreFilmstripOn of a session
-  let _thumbScrollTimer = null;
-  let _thumbLastRun = 0;
-  const THUMB_SCROLL_THROTTLE = 150;  // ms between loads while actively scrolling
+  const FILM_TILE_SIZE = 90;
+  const FILM_GAP = 4;
+  const FILM_BUFFER = 8;           // extra tiles buffered on each side of the viewport
+  const FILM_LOAD_DEBOUNCE = 100;  // ms of no scroll before actually fetching images
 
-  function buildFilmstrip(total) {
-    _filmstripReady = false;
+  let _filmPool = [];        // [{el, img, stars, idx: number|null, loadedIdx: number|null}]
+  let _filmReady = false;    // false until the first centreFilmstripOn of a session (instant jump vs animate)
+  let _filmRafScheduled = false;
+  let _filmLoadTimer = null;
+  let _filmResizeTimer = null;
+
+  function filmCell() {
+    return FILM_TILE_SIZE + FILM_GAP;
+  }
+
+  function layoutFilmstripSpacer() {
+    document.getElementById('filmstrip-spacer').style.width = `${_total * filmCell()}px`;
+  }
+
+  // Pool big enough to cover the viewport plus a buffer on each side — grown if
+  // a resize fits more tiles, but never shrunk (see the gallery grid's identical
+  // rationale above).
+  function ensureFilmPool() {
     const strip = document.getElementById('filmstrip');
-    strip.innerHTML = '';
-    _thumbLoaded.clear();
+    const needed = Math.ceil(strip.clientWidth / filmCell()) + 2 * FILM_BUFFER + 1;
+    const spacer = document.getElementById('filmstrip-spacer');
+    const top = Math.max(0, (strip.clientHeight - FILM_TILE_SIZE) / 2);
 
-    for (let i = 0; i < total; i++) {
-      const item = document.createElement('div');
-      item.className = 'thumb-item';
-      item.dataset.idx = i;
+    while (_filmPool.length < needed) {
+      const el = document.createElement('div');
+      el.className = 'thumb-item';
+      el.style.width = `${FILM_TILE_SIZE}px`;
+      el.style.height = `${FILM_TILE_SIZE}px`;
+      el.style.top = `${top}px`;
+      el.style.display = 'none';
 
-      const placeholder = document.createElement('div');
-      placeholder.className = 'thumb-placeholder';
-      placeholder.textContent = i + 1;
-      item.appendChild(placeholder);
+      const img = document.createElement('img');
+      img.alt = '';
+      el.appendChild(img);
 
       const stars = document.createElement('div');
       stars.className = 'thumb-stars';
-      stars.id = `thumb-stars-${i}`;
-      item.appendChild(stars);
+      el.appendChild(stars);
 
-      item.addEventListener('click', () => navigate(i));
-      strip.appendChild(item);
+      // Read idx from the node's live dataset at click time, not a closure —
+      // pool nodes are reused for different photos, so a captured idx goes stale.
+      el.addEventListener('click', () => {
+        const idx = parseInt(el.dataset.idx, 10);
+        if (isNaN(idx)) return;
+        navigate(idx, true);
+      });
+
+      spacer.appendChild(el);
+      _filmPool.push({ el, img, stars, idx: null, loadedIdx: null });
     }
   }
 
-  function loadVisibleThumbnails() {
+  function filmVisibleRange() {
     const strip = document.getElementById('filmstrip');
-    const margin = 300;
-    const left = strip.scrollLeft - margin;
-    const right = strip.scrollLeft + strip.offsetWidth + margin;
-    strip.querySelectorAll('.thumb-item').forEach(el => {
-      if (_thumbLoaded.has(parseInt(el.dataset.idx, 10))) return;
-      if (el.offsetLeft + el.offsetWidth >= left && el.offsetLeft <= right) {
-        loadThumb(parseInt(el.dataset.idx, 10), el);
+    const cell = filmCell();
+    const firstIdx = Math.max(0, Math.floor(strip.scrollLeft / cell) - FILM_BUFFER);
+    const lastIdx = Math.min(_total - 1, Math.ceil((strip.scrollLeft + strip.clientWidth) / cell) + FILM_BUFFER);
+    return { firstIdx, lastIdx };
+  }
+
+  // Positions/labels every tile in the current window immediately (cheap, no
+  // network) — including the current-photo highlight and prefetch-ready
+  // indicator, so those update even when centring doesn't need to move the
+  // strip at all.
+  //
+  // Slots keep stable identity across renders: a slot already showing an idx
+  // that's still in range is left completely alone (not blanked, not
+  // re-fetched) — only slots whose idx has scrolled out of range are recycled
+  // for newly-entering photos. Naively reassigning "slot i = firstIdx + i"
+  // every render would shift every slot's idx by one on a single-step
+  // navigation even though ~all the same photos are still visible, forcing a
+  // pointless blank+reload of the entire strip instead of just the one tile
+  // actually entering the window.
+  function renderFilmWindow() {
+    if (!_total) return;
+    const { firstIdx, lastIdx } = filmVisibleRange();
+    const cell = filmCell();
+    const ready = new Set(_prefetchReady);
+
+    const covered = new Set();
+    const freeSlots = [];
+    for (const entry of _filmPool) {
+      if (entry.idx !== null && entry.idx >= firstIdx && entry.idx <= lastIdx) {
+        covered.add(entry.idx);
+      } else {
+        freeSlots.push(entry);
       }
+    }
+
+    let freePos = 0;
+    for (let idx = firstIdx; idx <= lastIdx; idx++) {
+      if (covered.has(idx) || freePos >= freeSlots.length) continue;
+      const entry = freeSlots[freePos++];
+      entry.idx = idx;
+      entry.el.dataset.idx = idx;
+      entry.img.removeAttribute('src');   // blank now; loadFilmImages() fills it in
+    }
+
+    for (const entry of _filmPool) {
+      if (entry.idx === null || entry.idx < firstIdx || entry.idx > lastIdx) {
+        entry.el.style.display = 'none';
+        continue;
+      }
+      entry.el.style.display = '';
+      entry.el.style.left = `${entry.idx * cell}px`;
+      entry.el.classList.toggle('current', entry.idx === _currentIdx);
+      entry.el.classList.toggle('prefetched', ready.has(entry.idx));
+      const r = _ratings[entry.idx] || 0;
+      entry.stars.textContent = r >= 1 ? '★'.repeat(r) : '';
+    }
+  }
+
+  // Actually fetches thumbnails for whatever each pool slot is currently
+  // assigned to — split out from renderFilmWindow() so scroll-driven calls can
+  // debounce this (a fast scroll shouldn't fire a request for every transient
+  // position it passes through on the way to where it settles).
+  function loadFilmImages() {
+    for (const entry of _filmPool) {
+      if (entry.idx === null || entry.loadedIdx === entry.idx) continue;
+      entry.loadedIdx = entry.idx;
+      entry.img.src = `/api/thumbnail/${entry.idx}?v=${_sessionVer}`;
+    }
+  }
+
+  function scheduleFilmImageLoad() {
+    clearTimeout(_filmLoadTimer);
+    _filmLoadTimer = setTimeout(loadFilmImages, FILM_LOAD_DEBOUNCE);
+  }
+
+  function scheduleFilmRender() {
+    if (_filmRafScheduled) return;
+    _filmRafScheduled = true;
+    requestAnimationFrame(() => {
+      _filmRafScheduled = false;
+      renderFilmWindow();
+      scheduleFilmImageLoad();
     });
   }
 
-  // Scroll listener: throttled during active scrolling so thumbnails populate
-  // progressively rather than only once the strip settles, plus a trailing call
-  // 80ms after the last event to precisely catch the final resting position.
-  // Layout shifts from thumbnails loading do NOT trigger this — only user scroll does.
-  document.getElementById('filmstrip').addEventListener('scroll', () => {
-    clearTimeout(_thumbScrollTimer);
-    const now = Date.now();
-    if (now - _thumbLastRun >= THUMB_SCROLL_THROTTLE) {
-      _thumbLastRun = now;
-      loadVisibleThumbnails();
-    }
-    _thumbScrollTimer = setTimeout(() => {
-      _thumbLastRun = Date.now();
-      loadVisibleThumbnails();
-    }, 80);
-  }, { passive: true });
+  document.getElementById('filmstrip').addEventListener('scroll', scheduleFilmRender, { passive: true });
 
-  function loadThumb(idx, item) {
-    _thumbLoaded.add(idx);
-    const img = document.createElement('img');
-    img.alt = '';
-    img.onload = () => {
-      const placeholder = item.querySelector('.thumb-placeholder');
-      if (placeholder) placeholder.replaceWith(img);
-      // Swapping a placeholder for the real image can change its width (thumbnails
-      // aren't all the same aspect ratio), which shifts every item after it in the
-      // row — including, indirectly, the current item's position. Re-centre so the
-      // strip never drifts off-centre as thumbnails keep loading in.
-      resnapFilmstripIfDrifted();
-    };
-    img.src = `/api/thumbnail/${idx}?v=${_sessionVer}`;
-  }
+  window.addEventListener('resize', () => {
+    clearTimeout(_filmResizeTimer);
+    _filmResizeTimer = setTimeout(() => {
+      ensureFilmPool();
+      renderFilmWindow();
+      scheduleFilmImageLoad();
+    }, 150);
+  });
 
-  function updateFilmstripCurrent(idx) {
-    document.querySelectorAll('.thumb-item.current').forEach(el => el.classList.remove('current'));
-    const el = document.querySelector(`.thumb-item[data-idx="${idx}"]`);
-    if (el) el.classList.add('current');
-  }
-
-  // Filmstrip centering is animated with our own requestAnimationFrame tween rather
-  // than CSS `scroll-behavior: smooth` — that gives no way to tell whether a glide is
-  // still in flight, so a rapid next navigation could only guess (via a timer) whether
-  // to interrupt it. Owning the loop means we always know exactly when one is running.
-  let _filmstripAnimId = null;
-  const FILMSTRIP_GLIDE_MS = 260;
-
-  function filmstripTargetOffset(idx) {
-    const el = document.querySelector(`.thumb-item[data-idx="${idx}"]`);
-    if (!el) return null;
-    const strip = document.getElementById('filmstrip');
-    const stripRect = strip.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    return elRect.left - stripRect.left + strip.scrollLeft - stripRect.width / 2 + elRect.width / 2;
-  }
-
-  function snapFilmstripTo(offset) {
-    if (_filmstripAnimId !== null) {
-      cancelAnimationFrame(_filmstripAnimId);
-      _filmstripAnimId = null;
-    }
-    document.getElementById('filmstrip').scrollLeft = offset;
-  }
-
-  function animateFilmstripTo(targetOffset) {
-    const strip = document.getElementById('filmstrip');
-    const startOffset = strip.scrollLeft;
-    const delta = targetOffset - startOffset;
-    const startTime = performance.now();
-    const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
-
-    function step(now) {
-      const t = Math.min(1, (now - startTime) / FILMSTRIP_GLIDE_MS);
-      strip.scrollLeft = startOffset + delta * easeOutCubic(t);
-      _filmstripAnimId = t < 1 ? requestAnimationFrame(step) : null;
-    }
-    _filmstripAnimId = requestAnimationFrame(step);
+  function buildFilmstrip() {
+    _filmReady = false;
+    layoutFilmstripSpacer();
+    ensureFilmPool();
+    // Reset pool bookkeeping so the new folder's photos get freshly assigned
+    // (and blanked) rather than momentarily showing the previous folder's images.
+    _filmPool.forEach(entry => {
+      entry.idx = null;
+      entry.loadedIdx = null;
+      entry.el.style.display = 'none';
+    });
+    document.getElementById('filmstrip').scrollLeft = 0;
   }
 
   function centreFilmstripOn(idx) {
-    const offset = filmstripTargetOffset(idx);
-    if (offset === null) return;
-    if (!_filmstripReady) {
-      // Jump instantly on initial load so only the thumbnails at the final
-      // scroll position are loaded, not every photo scrolled past.
-      snapFilmstripTo(offset);
-      _filmstripReady = true;
-      loadVisibleThumbnails();
-      return;
-    }
-    if (_filmstripAnimId !== null) {
-      // The previous glide hasn't finished — snap straight to the new target
-      // instead of restarting another glide, which would look jittery.
-      snapFilmstripTo(offset);
-    } else {
-      animateFilmstripTo(offset);
-    }
-  }
-
-  function resnapFilmstripIfDrifted() {
-    // Don't fight a glide the user is actively watching — only correct drift while idle.
-    if (_filmstripAnimId !== null || !_filmstripReady) return;
-    const offset = filmstripTargetOffset(_currentIdx);
-    if (offset === null) return;
     const strip = document.getElementById('filmstrip');
-    if (Math.abs(offset - strip.scrollLeft) > 0.5) {
-      strip.scrollLeft = offset;
-    }
-  }
-
-  function refreshFilmstripRatings() {
-    for (let i = 0; i < _ratings.length; i++) updateThumbStars(i);
+    const target = Math.max(0, idx * filmCell() + FILM_TILE_SIZE / 2 - strip.clientWidth / 2);
+    // Explicit behavior on every call rather than relying on a CSS
+    // `scroll-behavior` default — that applies to *any* scroll change on the
+    // element, including a plain `scrollLeft` assignment, so an "instant" jump
+    // would otherwise still animate.
+    //
+    // Native smooth-scroll duration scales with distance, not a fixed time
+    // budget — fine for a single-step arrow-key nudge, but a jump clear across
+    // a large library (progress-editor jump, filmstrip/gallery click far away)
+    // would otherwise glide for multiple seconds. Snap instantly once the jump
+    // is more than a screenful away; only nearby moves animate.
+    const bigJump = !_filmReady || Math.abs(target - strip.scrollLeft) > strip.clientWidth;
+    strip.scrollTo({ left: target, behavior: bigJump ? 'instant' : 'smooth' });
+    _filmReady = true;
   }
 
   function updateThumbStars(idx) {
-    const el = document.getElementById(`thumb-stars-${idx}`);
-    if (!el) return;
+    const entry = _filmPool.find(e => e.idx === idx);
+    if (!entry) return;
     const r = _ratings[idx] || 0;
-    el.textContent = r >= 1 ? '★'.repeat(r) : '';
-  }
-
-  function updatePrefetchIndicators() {
-    const ready = new Set(_prefetchReady);
-    document.querySelectorAll('.thumb-item').forEach(el => {
-      el.classList.toggle('prefetched', ready.has(parseInt(el.dataset.idx, 10)));
-    });
+    entry.stars.textContent = r >= 1 ? '★'.repeat(r) : '';
   }
 
   // ── Copy photos modal ──────────────────────────────────────────────────────
@@ -1219,6 +1321,253 @@
     clearTimeout(_toastTimer);
     _toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
   }
+
+  // ── Gallery grid view ──────────────────────────────────────────────────────
+  //
+  // A Lightroom-style grid for visually scanning the whole library and jumping
+  // straight to a photo. Unlike the filmstrip (one permanent DOM node per photo,
+  // fine for a short horizontal strip), the gallery's whole point is scrolling
+  // through potentially tens of thousands of photos, so it uses a small recycled
+  // pool of DOM nodes repositioned by pure arithmetic from scrollTop — decoded
+  // thumbnail memory stays bounded to the pool size regardless of library size,
+  // and there's no DOM query or layout read on the scroll path.
+
+  const GALLERY_TILE_SIZE = 160;
+  const GALLERY_CAPTION_HEIGHT = 20;
+  const GALLERY_GAP = 4;
+  const GALLERY_BUFFER_ROWS = 2;
+  const GALLERY_LOAD_DEBOUNCE = 100;   // ms of no scroll before actually fetching images
+
+  let _galleryOpen = false;
+  let _galleryColumns = 1;
+  // [{el, img, stars, info, idx: number|null, loadedIdx: number|null}], grown on
+  // demand, never shrunk. `idx` is what this slot is currently positioned/labelled
+  // as (updated immediately); `loadedIdx` is what its <img> src actually points at
+  // (updated only when loadGalleryImages() runs) — kept separate so a fast scroll
+  // can reposition/relabel tiles instantly while deferring the network fetch.
+  let _galleryPool = [];
+  let _galleryRafScheduled = false;
+  let _galleryResizeTimer = null;
+  let _galleryLoadTimer = null;
+  let _filenames = [];           // filename per idx, fetched once per session (see connectSSE/_sessionActive setup)
+
+  function galleryCellHeight() {
+    return GALLERY_TILE_SIZE + GALLERY_CAPTION_HEIGHT;
+  }
+
+  function galleryRowHeight() {
+    return galleryCellHeight() + GALLERY_GAP;
+  }
+
+  function galleryComputeColumns() {
+    const viewport = document.getElementById('gallery-viewport');
+    return Math.max(1, Math.floor(viewport.clientWidth / (GALLERY_TILE_SIZE + GALLERY_GAP)));
+  }
+
+  function layoutGallerySpacer() {
+    _galleryColumns = galleryComputeColumns();
+    const rows = Math.ceil(_total / _galleryColumns);
+    document.getElementById('gallery-spacer').style.height = `${rows * galleryRowHeight()}px`;
+  }
+
+  // Pool big enough to cover the viewport plus a buffer of rows above/below —
+  // grown if a resize fits more columns/rows, but never shrunk (reusing a
+  // slightly-oversized pool is free; recreating nodes on every shrink isn't).
+  function ensureGalleryPool() {
+    const viewport = document.getElementById('gallery-viewport');
+    const rowsVisible = Math.ceil(viewport.clientHeight / galleryRowHeight()) + 2 * GALLERY_BUFFER_ROWS + 1;
+    const needed = rowsVisible * _galleryColumns;
+    const pool = document.getElementById('gallery-pool');
+
+    while (_galleryPool.length < needed) {
+      const el = document.createElement('div');
+      el.className = 'gallery-tile';
+      el.style.width = `${GALLERY_TILE_SIZE}px`;
+      el.style.height = `${galleryCellHeight()}px`;
+      el.style.display = 'none';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'gallery-tile-img-wrap';
+      imgWrap.style.height = `${GALLERY_TILE_SIZE}px`;
+
+      const img = document.createElement('img');
+      img.alt = '';
+      imgWrap.appendChild(img);
+
+      const stars = document.createElement('div');
+      stars.className = 'gallery-tile-stars';
+      imgWrap.appendChild(stars);
+
+      const info = document.createElement('div');
+      info.className = 'gallery-tile-info';
+
+      el.appendChild(imgWrap);
+      el.appendChild(info);
+
+      // Read idx from the node's live dataset at click time, not a closure —
+      // pool nodes are reused for different photos, so a captured idx goes stale.
+      el.addEventListener('click', () => {
+        const idx = parseInt(el.dataset.idx, 10);
+        if (isNaN(idx)) return;
+        navigate(idx, true);
+        closeGallery();
+      });
+
+      pool.appendChild(el);
+      _galleryPool.push({ el, img, stars, info, idx: null, loadedIdx: null });
+    }
+  }
+
+  function galleryVisibleRange() {
+    const viewport = document.getElementById('gallery-viewport');
+    const rowHeight = galleryRowHeight();
+    const scrollTop = viewport.scrollTop;
+    const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - GALLERY_BUFFER_ROWS);
+    const lastRow = Math.ceil((scrollTop + viewport.clientHeight) / rowHeight) + GALLERY_BUFFER_ROWS;
+    const firstIdx = firstRow * _galleryColumns;
+    const lastIdx = Math.min(_total - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
+    return { firstIdx, lastIdx };
+  }
+
+  // Positions/labels every tile in the current window immediately (cheap, no
+  // network).
+  //
+  // Slots keep stable identity across renders: a slot already showing an idx
+  // that's still in range is left completely alone (not blanked, not
+  // re-fetched) — only slots whose idx has scrolled out of range are recycled
+  // for newly-entering photos. Naively reassigning "slot i = firstIdx + i"
+  // every render would reshuffle every slot's idx on nearly any scroll (a
+  // single row of vertical movement shifts firstIdx by a whole row's worth of
+  // columns), forcing a pointless blank+reload of tiles that are still
+  // genuinely visible instead of just the row actually entering the window.
+  function renderGalleryWindow() {
+    if (!_galleryOpen || !_total) return;
+    const { firstIdx, lastIdx } = galleryVisibleRange();
+    const rowHeight = galleryRowHeight();
+    const cell = GALLERY_TILE_SIZE + GALLERY_GAP;
+
+    const covered = new Set();
+    const freeSlots = [];
+    for (const entry of _galleryPool) {
+      if (entry.idx !== null && entry.idx >= firstIdx && entry.idx <= lastIdx) {
+        covered.add(entry.idx);
+      } else {
+        freeSlots.push(entry);
+      }
+    }
+
+    let freePos = 0;
+    for (let idx = firstIdx; idx <= lastIdx; idx++) {
+      if (covered.has(idx) || freePos >= freeSlots.length) continue;
+      const entry = freeSlots[freePos++];
+      entry.idx = idx;
+      entry.el.dataset.idx = idx;
+      entry.img.removeAttribute('src');   // blank now; loadGalleryImages() fills it in
+      entry.info.textContent = _filenames[idx] || '';
+    }
+
+    for (const entry of _galleryPool) {
+      if (entry.idx === null || entry.idx < firstIdx || entry.idx > lastIdx) {
+        entry.el.style.display = 'none';
+        continue;
+      }
+      const row = Math.floor(entry.idx / _galleryColumns);
+      const col = entry.idx % _galleryColumns;
+      entry.el.style.display = '';
+      entry.el.style.top = `${row * rowHeight}px`;
+      entry.el.style.left = `${col * cell}px`;
+      entry.el.classList.toggle('current', entry.idx === _currentIdx);
+      const r = _ratings[entry.idx] || 0;
+      entry.stars.textContent = r >= 1 ? '★'.repeat(r) : '';
+    }
+  }
+
+  // Actually fetches thumbnails for whatever each pool slot is currently assigned
+  // to. Split out from renderGalleryWindow() so scroll-driven calls can debounce
+  // this (avoid firing a request for every transient position during a fast
+  // scroll — those tiles are gone before the fetch would even land) while
+  // open/resize can call it immediately for a snappy first paint.
+  function loadGalleryImages() {
+    for (const entry of _galleryPool) {
+      if (entry.idx === null || entry.loadedIdx === entry.idx) continue;
+      entry.loadedIdx = entry.idx;
+      entry.img.src = `/api/thumbnail/${entry.idx}?v=${_sessionVer}`;
+    }
+  }
+
+  function scheduleGalleryImageLoad() {
+    clearTimeout(_galleryLoadTimer);
+    _galleryLoadTimer = setTimeout(loadGalleryImages, GALLERY_LOAD_DEBOUNCE);
+  }
+
+  function scheduleGalleryRender() {
+    if (_galleryRafScheduled) return;
+    _galleryRafScheduled = true;
+    requestAnimationFrame(() => {
+      _galleryRafScheduled = false;
+      renderGalleryWindow();
+      scheduleGalleryImageLoad();
+    });
+  }
+
+  function scrollGalleryToIdx(idx) {
+    const viewport = document.getElementById('gallery-viewport');
+    const rowHeight = galleryRowHeight();
+    const row = Math.floor(idx / _galleryColumns);
+    const targetTop = row * rowHeight + rowHeight / 2 - viewport.clientHeight / 2;
+    viewport.scrollTop = Math.max(0, targetTop);
+  }
+
+  // idx nearest the viewport's vertical center — used to keep the same photo in
+  // view across a resize, since a column-count change moves every idx's position.
+  function galleryCenterIdx() {
+    const viewport = document.getElementById('gallery-viewport');
+    const rowHeight = galleryRowHeight();
+    const centerY = viewport.scrollTop + viewport.clientHeight / 2;
+    const row = Math.floor(centerY / rowHeight);
+    const col = Math.floor(_galleryColumns / 2);
+    return Math.min(_total - 1, Math.max(0, row * _galleryColumns + col));
+  }
+
+  function galleryHandleResize() {
+    if (!_galleryOpen) return;
+    const anchorIdx = galleryCenterIdx();
+    layoutGallerySpacer();
+    ensureGalleryPool();
+    scrollGalleryToIdx(anchorIdx);
+    renderGalleryWindow();
+    loadGalleryImages();
+  }
+
+  function openGallery() {
+    if (!_total || _galleryOpen) return;
+    // Don't stack on top of an already-open modal (help/copy/export) — a stray
+    // G press or button click while one is up shouldn't open a full-screen view
+    // underneath it.
+    if (document.querySelector('#help-modal-backdrop:not(.hidden)')) return;
+    if (document.querySelector('#copy-modal-backdrop:not(.hidden)')) return;
+    if (document.querySelector('#export-xmp-modal-backdrop:not(.hidden)')) return;
+
+    _galleryOpen = true;
+    document.getElementById('gallery-overlay').classList.remove('hidden');
+    layoutGallerySpacer();
+    ensureGalleryPool();
+    scrollGalleryToIdx(_currentIdx);
+    renderGalleryWindow();
+    loadGalleryImages();
+  }
+
+  function closeGallery() {
+    _galleryOpen = false;
+    document.getElementById('gallery-overlay').classList.add('hidden');
+  }
+
+  document.getElementById('gallery-viewport').addEventListener('scroll', scheduleGalleryRender, { passive: true });
+
+  window.addEventListener('resize', () => {
+    clearTimeout(_galleryResizeTimer);
+    _galleryResizeTimer = setTimeout(galleryHandleResize, 150);
+  });
 
   // ── Fullscreen ─────────────────────────────────────────────────────────────
 

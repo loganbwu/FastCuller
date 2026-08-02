@@ -5,9 +5,12 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 ## Features
 
 - Browse CR3 files recursively, sorted by capture date (from an XMP sidecar if present, otherwise file modification time)
+- Loading bar with real progress while a folder is being scanned and loaded — the scan itself is parallelized across files, not just the bar
 - `fastculler-write-dates` CLI tool to pre-populate XMP sidecars with capture date, for fast + accurate sort order on large folders
 - Rate photos with 0–5 stars (written to XMP sidecar files)
-- Filmstrip view with star overlays and natural aspect ratio thumbnails
+- Filmstrip view with star overlays, virtualized the same way as the gallery grid so it stays responsive at any library size
+- Gallery grid view (`G` key or the Gallery button) — a Lightroom-style scrollable grid
+  of the whole library for visually finding a photo, click one to jump straight to it
 - Rating summary in the header (count per star tier)
 - EXIF metadata overlay on main image (ISO, shutter, aperture, focal length, lens)
 - Keyboard shortcuts for efficient culling
@@ -35,6 +38,7 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 | `End` | Jump to last unrated photo |
 | `Cmd/Ctrl` + `Z` | Undo last rating |
 | `F` | Toggle fullscreen |
+| `G` | Toggle gallery grid view |
 | `?` | Show keyboard shortcut help |
 | `Esc` | Close modals / reset zoom / exit fullscreen |
 
@@ -59,7 +63,7 @@ src/fastculler/
 ├── thumb_cli.py   fastculler-build-thumbnails CLI tool
 ├── cli_progress.py  Shared terminal progress bar for the CLI tools
 ├── templates/
-│   └── index.html Folder picker screen, header, main panel, filmstrip
+│   └── index.html Folder picker screen, header, main panel, filmstrip, gallery grid
 └── static/
     └── style.css  Dark UI (based on AutoCropper)
 tests/
@@ -79,6 +83,7 @@ tests/
 | `/api/image/<idx>` | GET | Full-size JPEG preview for photo at index |
 | `/api/thumbnail/<idx>` | GET | Small thumbnail for filmstrip |
 | `/api/exif/<idx>` | GET | EXIF metadata dict for photo at index |
+| `/api/filenames` | GET | Filename for every photo in the session, in order — used by the gallery grid |
 | `/api/navigate` | POST | Navigate to a photo by index |
 | `/api/rate` | POST | Rate current photo, optionally advance |
 | `/api/copy` | POST | Copy photos by rating to a destination folder |
@@ -87,8 +92,43 @@ tests/
 ## Prefetch Strategy
 
 The server prefetches images and thumbnails in the background, prioritizing the current
-photo, then nearby photos in sequence, then 0- and 1-star neighbours — so navigation
-stays responsive even when flicking through many photos quickly.
+photo, then nearby photos in sequence, then 0- and 1-star neighbours within
+`PREFETCH_RATING_SEARCH_LIMIT` (500) photos of the current one — capped so a sparsely-rated
+library doesn't send it chasing a stray rated photo tens of thousands of photos away, which
+wastefully fetches something nowhere near what you're actually about to look at.
+
+Background prefetch doesn't start until the very first photo has actually been requested —
+not the moment the folder finishes loading — so it never competes with that first, most
+important request for I/O or decode time.
+
+On the client, both the filmstrip and the gallery grid render from a small recycled pool
+of DOM nodes rather than one element per photo — bounded to roughly what's on screen
+regardless of library size. Pool slots keep stable identity across scrolling/navigation:
+a photo already on screen is left alone (not re-blanked, not re-fetched) even as the
+window shifts — only the slots whose photo has actually scrolled out of view get
+recycled for newly-entering ones. Centring the filmstrip on the current photo snaps
+instantly for a jump of more than a screenful away (progress-editor jump, a click far
+away in the filmstrip/gallery) and animates smoothly for a single-step move.
+
+## Gallery Grid View
+
+Press `G` (or click **Gallery**) to open a Lightroom-style grid of the whole library —
+useful for visually scanning to find a photo when you don't know its position. Scroll
+to find it, click it, and you land back in the normal single-photo view at that photo.
+
+The grid is virtualized: only the handful of tiles actually near the viewport exist as
+real DOM nodes at any time (recycled as you scroll), so opening it and scrolling
+through is just as fast whether the library has 100 photos or 40,000 — nothing decodes
+or holds tens of thousands of thumbnails in memory at once. Escape or clicking a tile
+closes the grid; keyboard shortcuts are disabled while it's open (nothing to rate or
+navigate to while you're just looking for a photo).
+
+Each tile shows its filename underneath the thumbnail. A tile whose photo isn't loaded
+yet shows a plain grey box rather than a previous or unrelated photo — during a fast
+scroll, the actual thumbnail fetch is deferred a moment until scrolling settles (a
+tile's position and filename update immediately either way), so flicking quickly
+through the whole grid doesn't pile up a queue of requests for positions you've
+already scrolled past.
 
 ## Thumbnail Cache
 
@@ -351,5 +391,8 @@ than sent to you directly), they don't need to send you the photos back — just
 - [x] Jump to a specific photo by number (click the progress counter)
 - [x] `fastculler-write-dates` CLI tool + sort by XMP capture date, falling back to mtime
 - [x] On-disk thumbnail cache + `fastculler-build-thumbnails` CLI tool
+- [x] Gallery grid view (virtualized, scroll to find a photo, click to jump to it)
+- [x] Filmstrip rewritten to the same virtualized-pool approach, replacing the old per-photo DOM nodes and custom scroll-animation code
+- [x] Parallelized folder scan + real loading-bar progress; prefetch deferred until the first photo request; bounded rating-neighbour prefetch search
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)

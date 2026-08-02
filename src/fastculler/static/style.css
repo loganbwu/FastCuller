@@ -230,6 +230,22 @@ body {
   color: var(--grey);
 }
 
+#overlay-progress-bar {
+  width: 240px;
+  height: 4px;
+  background: #333;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#overlay-progress-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--pale-blue);
+  border-radius: 2px;
+  transition: width 0.15s ease-out;
+}
+
 .spinner {
   width: 36px;
   height: 36px;
@@ -313,15 +329,9 @@ body {
 }
 
 #filmstrip {
-  display: flex;
-  align-items: center;
   height: 100%;
-  gap: 4px;
-  padding: 6px 4px;
   overflow-x: auto;
   overflow-y: hidden;
-  /* Centering animation is driven entirely by JS (see animateFilmstripTo) so it can be
-     precisely interrupted/cancelled — deliberately no `scroll-behavior: smooth` here. */
   scrollbar-width: thin;
   scrollbar-color: #444 #141414;
 }
@@ -330,14 +340,16 @@ body {
 #filmstrip::-webkit-scrollbar-track { background: #141414; }
 #filmstrip::-webkit-scrollbar-thumb { background: #444; border-radius: 2px; }
 
+/* Sized in JS (filmstripSpacerWidth) to total*cell so the scrollbar has the
+   correct range without needing a real tile in the DOM for every photo. */
+#filmstrip-spacer { position: relative; height: 100%; }
+
 .thumb-item {
-  position: relative;
-  flex: 0 0 auto;
-  height: 90px;
+  position: absolute;
   cursor: pointer;
   border: 2px solid transparent;
   transition: border-color 0.15s;
-  background: #222;
+  background: #2a2a2a;
   overflow: hidden;
 }
 
@@ -349,20 +361,10 @@ body {
 }
 
 .thumb-item img {
+  width: 100%;
   height: 100%;
-  width: auto;
+  object-fit: contain;
   display: block;
-}
-
-.thumb-item .thumb-placeholder {
-  width: 120px;
-  height: 100%;
-  background: #2a2a2a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #555;
-  font-size: 11px;
 }
 
 /* star overlay on thumbnails */
@@ -375,6 +377,104 @@ body {
   pointer-events: none;
   text-shadow: 0 1px 2px rgba(0,0,0,0.8);
   letter-spacing: 1px;
+}
+
+/* ── Gallery grid view ── */
+
+#gallery-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  background: var(--black);
+  display: flex;
+  flex-direction: column;
+}
+
+#gallery-overlay.hidden { display: none; }
+
+#gallery-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+}
+
+#gallery-title {
+  font-family: 'Oswald', sans-serif;
+  color: var(--white);
+}
+
+#gallery-viewport {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #444 #141414;
+}
+
+#gallery-viewport::-webkit-scrollbar { width: 8px; }
+#gallery-viewport::-webkit-scrollbar-track { background: #141414; }
+#gallery-viewport::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+
+#gallery-spacer { position: relative; }
+
+.gallery-tile {
+  position: absolute;
+  cursor: pointer;
+  border: 2px solid transparent;
+  background: #222;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.gallery-tile:hover { border-color: #888; }
+
+.gallery-tile.current {
+  border-color: var(--pale-blue);
+  box-shadow: 0 0 0 1px var(--pale-blue);
+}
+
+/* Grey box shown whenever the tile's photo isn't loaded yet — a bare <img>
+   with no src has no intrinsic size, so this background is what's actually
+   visible until (or unless) a thumbnail loads into it. */
+.gallery-tile-img-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  background: #2a2a2a;
+}
+
+.gallery-tile-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.gallery-tile-stars {
+  position: absolute;
+  bottom: 3px;
+  left: 4px;
+  font-size: 11px;
+  color: var(--star-gold);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  letter-spacing: 1px;
+}
+
+.gallery-tile-info {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: 'Oswald', sans-serif;
+  color: var(--grey);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Copy modal ── */
