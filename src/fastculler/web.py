@@ -27,8 +27,8 @@ from .thumb_cache import read_cached_thumbnail, write_cached_thumbnail
 
 THUMBNAIL_CACHE_MAX = 100   # max thumbnails kept in memory
 IMAGE_CACHE_MAX = 150       # max full-size images kept in memory
-PREFETCH_WINDOW = 10        # sequential backward and per-rating neighbours to prefetch
-PREFETCH_FORWARD = 50       # sequential forward neighbours to prefetch
+PREFETCH_WINDOW = 5         # sequential backward and per-rating neighbours to prefetch
+PREFETCH_FORWARD = 5        # sequential forward neighbours to prefetch
 PREFETCH_WORKERS = 4        # persistent full-image prefetch worker threads
 THUMB_PREFETCH_WORKERS = 2  # persistent thumbnail prefetch worker threads
 PREFETCH_RATING_SEARCH_LIMIT = 500  # max distance to search for a rated neighbour to prefetch
@@ -292,6 +292,8 @@ class CullerState:
         permanently unreadable file would pin a worker in a tight retry loop forever.
         """
         def next_target():
+            if not self._prefetch_started:
+                return None
             for idx in self._prefetch_indices(self.current_idx)[:cache_max]:
                 if idx not in cache and idx not in inflight and idx not in failed:
                     return idx

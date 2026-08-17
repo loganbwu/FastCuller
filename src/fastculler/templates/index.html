@@ -138,6 +138,8 @@
         <tr><td class="key-cell"><kbd>Shift</kbd> + <kbd>1</kbd>–<kbd>5</kbd></td><td>Rate N stars without advancing</td></tr>
         <tr><td class="key-cell"><kbd>Shift</kbd> + <kbd>`</kbd></td><td>Rate 0 stars without advancing</td></tr>
         <tr><td class="key-cell"><kbd>&#8592;</kbd> / <kbd>&#8594;</kbd></td><td>Navigate previous / next</td></tr>
+        <tr><td class="key-cell"><kbd>&#8593;</kbd></td><td>Increase rating by 1 star and advance to next</td></tr>
+        <tr><td class="key-cell"><kbd>&#8595;</kbd></td><td>Rate 0 stars (no advance)</td></tr>
         <tr><td class="key-cell"><kbd>&#8592;</kbd> + <kbd>1</kbd></td><td>Jump to previous 1-star photo</td></tr>
         <tr><td class="key-cell"><kbd>&#8594;</kbd> + <kbd>1</kbd></td><td>Jump to next 1-star photo</td></tr>
         <tr><td class="key-cell"><kbd>&#8592;</kbd> + <kbd>`</kbd></td><td>Jump to previous 0-star photo</td></tr>
@@ -147,6 +149,7 @@
         <tr><td class="key-cell"><kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + <kbd>Z</kbd></td><td>Undo last rating</td></tr>
         <tr><td class="key-cell"><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
         <tr><td class="key-cell"><kbd>G</kbd></td><td>Toggle gallery grid view</td></tr>
+        <tr><td class="key-cell"><kbd>Space</kbd></td><td>In gallery view: open the highlighted photo</td></tr>
         <tr><td class="key-cell">Pinch / <kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + scroll</td><td>Zoom main image in/out</td></tr>
         <tr><td class="key-cell">Two-finger swipe</td><td>Pan main image when zoomed in</td></tr>
         <tr><td class="key-cell">Double-click</td><td>Zoom in to point / reset zoom</td></tr>
@@ -208,9 +211,16 @@
     }
     for (const idx of nearestRatingIndices(fromIdx)) keep.add(idx);
 
-    // Evict entries outside the kept set to free memory
+    // Evict entries outside the kept set, and cancel their request too — just
+    // dropping the map entry leaves the browser fetching it in the background
+    // regardless, tying up one of the ~6 connections per origin until it
+    // finishes (which can take a while on a slow/networked library) and
+    // delaying whatever the user actually navigates to next.
     for (const k of _preloadMap.keys()) {
-      if (!keep.has(k)) _preloadMap.delete(k);
+      if (!keep.has(k)) {
+        _preloadMap.get(k).removeAttribute('src');
+        _preloadMap.delete(k);
+      }
     }
     for (const idx of keep) {
       if (idx !== fromIdx && !_preloadMap.has(idx)) {
@@ -395,6 +405,11 @@
 
   let _loadingIdx = null;
   let _mainImageSettledIdx = null;  // last idx loadMainImage has resolved (success or failure)
+  // A directly-created (not piggybacked off preloadAround) in-flight main-image
+  // fetch, so a fast follow-up jump (e.g. clicking a distant gallery tile again
+  // before the first jump's image arrives) can cancel it instead of leaving it
+  // to occupy a connection slot for an image nobody's waiting on any more.
+  let _mainImageFreshTmp = null;
 
   // True once the main image has caught up with _currentIdx. Used to hold off further
   // navigation while rapid-fire input (e.g. holding an arrow key) has raced ahead of
@@ -448,6 +463,12 @@
 
   function loadMainImage(idx) {
     _loadingIdx = idx;
+    // A fresh (non-preloaded) fetch from a previous jump that hasn't arrived
+    // yet is no longer wanted — cancel it so it stops occupying a connection.
+    if (_mainImageFreshTmp) {
+      _mainImageFreshTmp.removeAttribute('src');
+      _mainImageFreshTmp = null;
+    }
     const img = document.getElementById('main-img');
     if (img.getAttribute('data-idx') == idx) {
       _mainImageSettledIdx = idx;
@@ -499,6 +520,7 @@
     // waiting forever on a dead object.
     const stillLoading = preloaded && !preloaded.complete;
     const tmp = stillLoading ? preloaded : new Image();
+    if (!stillLoading) _mainImageFreshTmp = tmp;
     tmp.onload = () => settle(tmp.src);
     tmp.onerror = () => settle(null);
     if (!stillLoading) {
@@ -680,6 +702,7 @@
     // would silently act on the hidden single-photo view underneath).
     if (_galleryOpen) {
       if (e.key === 'Escape' || e.key === 'g' || e.key === 'G') { closeGallery(); e.preventDefault(); }
+      if (e.key === ' ') { navigate(_currentIdx, true); closeGallery(); e.preventDefault(); }
       return;
     }
 
@@ -726,6 +749,19 @@
         if (!_ratings[i]) { idx = i; break; }
       }
       if (idx >= 0) navigate(idx);
+      return;
+    }
+
+    // Up = increase rating by 1 (capped at 5) and advance, Down = reset to 0 in place
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = Math.min(5, (_ratings[_currentIdx] || 0) + 1);
+      rateAndAdvance(_currentIdx, next);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      rateOnly(_currentIdx, 0);
       return;
     }
 
@@ -1335,8 +1371,7 @@
   const GALLERY_TILE_SIZE = 160;
   const GALLERY_CAPTION_HEIGHT = 20;
   const GALLERY_GAP = 4;
-  const GALLERY_BUFFER_ROWS = 2;
-  const GALLERY_LOAD_DEBOUNCE = 100;   // ms of no scroll before actually fetching images
+  const GALLERY_BUFFER_ROWS = 5;
 
   let _galleryOpen = false;
   let _galleryColumns = 1;
@@ -1348,7 +1383,6 @@
   let _galleryPool = [];
   let _galleryRafScheduled = false;
   let _galleryResizeTimer = null;
-  let _galleryLoadTimer = null;
   let _filenames = [];           // filename per idx, fetched once per session (see connectSSE/_sessionActive setup)
 
   function galleryCellHeight() {
@@ -1429,6 +1463,22 @@
     return { firstIdx, lastIdx };
   }
 
+  // Same as above but without the buffer rows — the tiles actually on screen
+  // right now, as opposed to the look-ahead margin kept warm around them.
+  // Used to prioritise thumbnail loading: on a fast scroll the buffer rows are
+  // just speculative, and shouldn't compete for connections with what the user
+  // is actually looking at.
+  function galleryOnscreenRange() {
+    const viewport = document.getElementById('gallery-viewport');
+    const rowHeight = galleryRowHeight();
+    const scrollTop = viewport.scrollTop;
+    const firstRow = Math.floor(scrollTop / rowHeight);
+    const lastRow = Math.ceil((scrollTop + viewport.clientHeight) / rowHeight);
+    const firstIdx = firstRow * _galleryColumns;
+    const lastIdx = Math.min(_total - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
+    return { firstIdx, lastIdx };
+  }
+
   // Positions/labels every tile in the current window immediately (cheap, no
   // network).
   //
@@ -1483,21 +1533,29 @@
   }
 
   // Actually fetches thumbnails for whatever each pool slot is currently assigned
-  // to. Split out from renderGalleryWindow() so scroll-driven calls can debounce
-  // this (avoid firing a request for every transient position during a fast
-  // scroll — those tiles are gone before the fetch would even land) while
-  // open/resize can call it immediately for a snappy first paint.
+  // to. Split out from renderGalleryWindow() so open/resize can call it directly
+  // for a snappy first paint. Cheap to call repeatedly during scroll — slots
+  // already showing their assigned idx are skipped, and reassigning a reused
+  // slot's src naturally aborts its previous in-flight request.
+  //
+  // On-screen tiles are dispatched before buffer-row tiles (and marked
+  // fetchPriority "high" vs "low") so a fast scroll's real target — what's
+  // actually visible — grabs the browser's limited per-origin connections
+  // ahead of the look-ahead margin, rather than competing with it on equal
+  // footing.
   function loadGalleryImages() {
-    for (const entry of _galleryPool) {
-      if (entry.idx === null || entry.loadedIdx === entry.idx) continue;
+    const { firstIdx: onFirst, lastIdx: onLast } = galleryOnscreenRange();
+    const pending = _galleryPool.filter(e => e.idx !== null && e.loadedIdx !== e.idx);
+    pending.sort((a, b) => {
+      const aOn = a.idx >= onFirst && a.idx <= onLast;
+      const bOn = b.idx >= onFirst && b.idx <= onLast;
+      return aOn === bOn ? 0 : (aOn ? -1 : 1);
+    });
+    for (const entry of pending) {
       entry.loadedIdx = entry.idx;
+      entry.img.fetchPriority = (entry.idx >= onFirst && entry.idx <= onLast) ? 'high' : 'low';
       entry.img.src = `/api/thumbnail/${entry.idx}?v=${_sessionVer}`;
     }
-  }
-
-  function scheduleGalleryImageLoad() {
-    clearTimeout(_galleryLoadTimer);
-    _galleryLoadTimer = setTimeout(loadGalleryImages, GALLERY_LOAD_DEBOUNCE);
   }
 
   function scheduleGalleryRender() {
@@ -1506,7 +1564,7 @@
     requestAnimationFrame(() => {
       _galleryRafScheduled = false;
       renderGalleryWindow();
-      scheduleGalleryImageLoad();
+      loadGalleryImages();
     });
   }
 
@@ -1560,6 +1618,15 @@
   function closeGallery() {
     _galleryOpen = false;
     document.getElementById('gallery-overlay').classList.add('hidden');
+    // Hiding the overlay doesn't stop still-loading tiles from fetching — cancel
+    // them so they don't keep occupying connections the single-photo view (or a
+    // freshly reopened gallery) needs, and reset the pool so reopening loads
+    // fresh rather than leaving blanked-out tiles from a cancelled fetch.
+    for (const entry of _galleryPool) {
+      entry.img.removeAttribute('src');
+      entry.idx = null;
+      entry.loadedIdx = null;
+    }
   }
 
   document.getElementById('gallery-viewport').addEventListener('scroll', scheduleGalleryRender, { passive: true });
