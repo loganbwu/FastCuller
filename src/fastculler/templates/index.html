@@ -65,6 +65,16 @@
 <div id="gallery-overlay" class="hidden">
   <div id="gallery-toolbar">
     <div id="gallery-title">Gallery</div>
+    <div id="gallery-filter">
+      <span class="gallery-filter-label">Show</span>
+      <button class="gallery-filter-btn" data-rating="0" onclick="toggleGalleryFilter(0)">Unrated</button>
+      <button class="gallery-filter-btn" data-rating="1" onclick="toggleGalleryFilter(1)">&#9733;1</button>
+      <button class="gallery-filter-btn" data-rating="2" onclick="toggleGalleryFilter(2)">&#9733;2</button>
+      <button class="gallery-filter-btn" data-rating="3" onclick="toggleGalleryFilter(3)">&#9733;3</button>
+      <button class="gallery-filter-btn" data-rating="4" onclick="toggleGalleryFilter(4)">&#9733;4</button>
+      <button class="gallery-filter-btn" data-rating="5" onclick="toggleGalleryFilter(5)">&#9733;5</button>
+      <button class="gallery-filter-btn" id="gallery-filter-all" onclick="clearGalleryFilter()">All</button>
+    </div>
     <button class="btn-secondary" onclick="closeGallery()">Close</button>
   </div>
   <div id="gallery-viewport">
@@ -150,6 +160,8 @@
         <tr><td class="key-cell"><kbd>F</kbd></td><td>Toggle fullscreen</td></tr>
         <tr><td class="key-cell"><kbd>G</kbd></td><td>Toggle gallery grid view</td></tr>
         <tr><td class="key-cell"><kbd>Space</kbd></td><td>In gallery view: open the highlighted photo</td></tr>
+        <tr><td class="key-cell"><kbd>`</kbd>, <kbd>1</kbd> – <kbd>5</kbd></td><td>In gallery view: toggle showing unrated / N-star photos</td></tr>
+        <tr><td class="key-cell"><kbd>A</kbd></td><td>In gallery view: show all photos (clear star filter)</td></tr>
         <tr><td class="key-cell">Pinch / <kbd>&#8984;</kbd>/<kbd>Ctrl</kbd> + scroll</td><td>Zoom main image in/out</td></tr>
         <tr><td class="key-cell">Two-finger swipe</td><td>Pan main image when zoomed in</td></tr>
         <tr><td class="key-cell">Double-click</td><td>Zoom in to point / reset zoom</td></tr>
@@ -352,6 +364,7 @@
     _state = null;
     _ratings = [];
     _filenames = [];
+    _galleryFilter.clear();
     _ratingHistory.length = 0;
     document.getElementById('btn-copy').disabled = true;
     document.getElementById('btn-export-xmp').disabled = true;
@@ -703,6 +716,9 @@
     if (_galleryOpen) {
       if (e.key === 'Escape' || e.key === 'g' || e.key === 'G') { closeGallery(); e.preventDefault(); }
       if (e.key === ' ') { navigate(_currentIdx, true); closeGallery(); e.preventDefault(); }
+      const galleryDigits = { Backquote: 0, Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4, Digit5: 5 };
+      if (e.code in galleryDigits && !e.metaKey && !e.ctrlKey) { toggleGalleryFilter(galleryDigits[e.code]); e.preventDefault(); }
+      if ((e.key === 'a' || e.key === 'A') && !e.metaKey && !e.ctrlKey) { clearGalleryFilter(); e.preventDefault(); }
       return;
     }
 
@@ -1375,11 +1391,19 @@
 
   let _galleryOpen = false;
   let _galleryColumns = 1;
-  // [{el, img, stars, info, idx: number|null, loadedIdx: number|null}], grown on
-  // demand, never shrunk. `idx` is what this slot is currently positioned/labelled
-  // as (updated immediately); `loadedIdx` is what its <img> src actually points at
-  // (updated only when loadGalleryImages() runs) — kept separate so a fast scroll
-  // can reposition/relabel tiles instantly while deferring the network fetch.
+  // Star-rating filter: the set of ratings (0 = unrated) to show; empty = show
+  // everything. Kept across open/close so reopening returns to the same view.
+  const _galleryFilter = new Set();
+  // Photo idx for each grid position, in library order — every photo when the
+  // filter is empty, otherwise just the matching ones. Rebuilt on open and on
+  // every filter change (ratings can't change while the gallery is open).
+  let _galleryIndices = [];
+  // [{el, img, stars, info, pos: number|null, idx: number|null, loadedIdx: number|null}],
+  // grown on demand, never shrunk. `pos` is the grid position this slot is laid
+  // out at and `idx` the photo shown there (_galleryIndices[pos]), both updated
+  // immediately; `loadedIdx` is what its <img> src actually points at (updated
+  // only when loadGalleryImages() runs) — kept separate so a fast scroll can
+  // reposition/relabel tiles instantly while deferring the network fetch.
   let _galleryPool = [];
   let _galleryRafScheduled = false;
   let _galleryResizeTimer = null;
@@ -1400,7 +1424,7 @@
 
   function layoutGallerySpacer() {
     _galleryColumns = galleryComputeColumns();
-    const rows = Math.ceil(_total / _galleryColumns);
+    const rows = Math.ceil(_galleryIndices.length / _galleryColumns);
     document.getElementById('gallery-spacer').style.height = `${rows * galleryRowHeight()}px`;
   }
 
@@ -1448,19 +1472,20 @@
       });
 
       pool.appendChild(el);
-      _galleryPool.push({ el, img, stars, info, idx: null, loadedIdx: null });
+      _galleryPool.push({ el, img, stars, info, pos: null, idx: null, loadedIdx: null });
     }
   }
 
+  // Ranges below are grid positions (indices into _galleryIndices), not photo idx.
   function galleryVisibleRange() {
     const viewport = document.getElementById('gallery-viewport');
     const rowHeight = galleryRowHeight();
     const scrollTop = viewport.scrollTop;
     const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - GALLERY_BUFFER_ROWS);
     const lastRow = Math.ceil((scrollTop + viewport.clientHeight) / rowHeight) + GALLERY_BUFFER_ROWS;
-    const firstIdx = firstRow * _galleryColumns;
-    const lastIdx = Math.min(_total - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
-    return { firstIdx, lastIdx };
+    const firstPos = firstRow * _galleryColumns;
+    const lastPos = Math.min(_galleryIndices.length - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
+    return { firstPos, lastPos };
   }
 
   // Same as above but without the buffer rows — the tiles actually on screen
@@ -1474,42 +1499,44 @@
     const scrollTop = viewport.scrollTop;
     const firstRow = Math.floor(scrollTop / rowHeight);
     const lastRow = Math.ceil((scrollTop + viewport.clientHeight) / rowHeight);
-    const firstIdx = firstRow * _galleryColumns;
-    const lastIdx = Math.min(_total - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
-    return { firstIdx, lastIdx };
+    const firstPos = firstRow * _galleryColumns;
+    const lastPos = Math.min(_galleryIndices.length - 1, (lastRow * _galleryColumns) + _galleryColumns - 1);
+    return { firstPos, lastPos };
   }
 
   // Positions/labels every tile in the current window immediately (cheap, no
   // network).
   //
-  // Slots keep stable identity across renders: a slot already showing an idx
+  // Slots keep stable identity across renders: a slot already showing a position
   // that's still in range is left completely alone (not blanked, not
-  // re-fetched) — only slots whose idx has scrolled out of range are recycled
-  // for newly-entering photos. Naively reassigning "slot i = firstIdx + i"
+  // re-fetched) — only slots whose position has scrolled out of range are recycled
+  // for newly-entering photos. Naively reassigning "slot i = firstPos + i"
   // every render would reshuffle every slot's idx on nearly any scroll (a
-  // single row of vertical movement shifts firstIdx by a whole row's worth of
+  // single row of vertical movement shifts firstPos by a whole row's worth of
   // columns), forcing a pointless blank+reload of tiles that are still
   // genuinely visible instead of just the row actually entering the window.
   function renderGalleryWindow() {
     if (!_galleryOpen || !_total) return;
-    const { firstIdx, lastIdx } = galleryVisibleRange();
+    const { firstPos, lastPos } = galleryVisibleRange();
     const rowHeight = galleryRowHeight();
     const cell = GALLERY_TILE_SIZE + GALLERY_GAP;
 
     const covered = new Set();
     const freeSlots = [];
     for (const entry of _galleryPool) {
-      if (entry.idx !== null && entry.idx >= firstIdx && entry.idx <= lastIdx) {
-        covered.add(entry.idx);
+      if (entry.pos !== null && entry.pos >= firstPos && entry.pos <= lastPos) {
+        covered.add(entry.pos);
       } else {
         freeSlots.push(entry);
       }
     }
 
-    let freePos = 0;
-    for (let idx = firstIdx; idx <= lastIdx; idx++) {
-      if (covered.has(idx) || freePos >= freeSlots.length) continue;
-      const entry = freeSlots[freePos++];
+    let freeSlot = 0;
+    for (let pos = firstPos; pos <= lastPos; pos++) {
+      if (covered.has(pos) || freeSlot >= freeSlots.length) continue;
+      const entry = freeSlots[freeSlot++];
+      const idx = _galleryIndices[pos];
+      entry.pos = pos;
       entry.idx = idx;
       entry.el.dataset.idx = idx;
       entry.img.removeAttribute('src');   // blank now; loadGalleryImages() fills it in
@@ -1517,12 +1544,12 @@
     }
 
     for (const entry of _galleryPool) {
-      if (entry.idx === null || entry.idx < firstIdx || entry.idx > lastIdx) {
+      if (entry.pos === null || entry.pos < firstPos || entry.pos > lastPos) {
         entry.el.style.display = 'none';
         continue;
       }
-      const row = Math.floor(entry.idx / _galleryColumns);
-      const col = entry.idx % _galleryColumns;
+      const row = Math.floor(entry.pos / _galleryColumns);
+      const col = entry.pos % _galleryColumns;
       entry.el.style.display = '';
       entry.el.style.top = `${row * rowHeight}px`;
       entry.el.style.left = `${col * cell}px`;
@@ -1544,16 +1571,16 @@
   // ahead of the look-ahead margin, rather than competing with it on equal
   // footing.
   function loadGalleryImages() {
-    const { firstIdx: onFirst, lastIdx: onLast } = galleryOnscreenRange();
+    const { firstPos: onFirst, lastPos: onLast } = galleryOnscreenRange();
     const pending = _galleryPool.filter(e => e.idx !== null && e.loadedIdx !== e.idx);
     pending.sort((a, b) => {
-      const aOn = a.idx >= onFirst && a.idx <= onLast;
-      const bOn = b.idx >= onFirst && b.idx <= onLast;
+      const aOn = a.pos >= onFirst && a.pos <= onLast;
+      const bOn = b.pos >= onFirst && b.pos <= onLast;
       return aOn === bOn ? 0 : (aOn ? -1 : 1);
     });
     for (const entry of pending) {
       entry.loadedIdx = entry.idx;
-      entry.img.fetchPriority = (entry.idx >= onFirst && entry.idx <= onLast) ? 'high' : 'low';
+      entry.img.fetchPriority = (entry.pos >= onFirst && entry.pos <= onLast) ? 'high' : 'low';
       entry.img.src = `/api/thumbnail/${entry.idx}?v=${_sessionVer}`;
     }
   }
@@ -1568,23 +1595,38 @@
     });
   }
 
+  // Grid position of the first photo at or after idx (binary search — the list
+  // is in library order). Lands on the nearest following match when idx itself
+  // is filtered out; clamped to the last position if nothing follows.
+  function galleryPosForIdx(idx) {
+    let lo = 0, hi = _galleryIndices.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (_galleryIndices[mid] < idx) lo = mid + 1; else hi = mid;
+    }
+    return Math.min(lo, Math.max(0, _galleryIndices.length - 1));
+  }
+
   function scrollGalleryToIdx(idx) {
     const viewport = document.getElementById('gallery-viewport');
     const rowHeight = galleryRowHeight();
-    const row = Math.floor(idx / _galleryColumns);
+    const row = Math.floor(galleryPosForIdx(idx) / _galleryColumns);
     const targetTop = row * rowHeight + rowHeight / 2 - viewport.clientHeight / 2;
     viewport.scrollTop = Math.max(0, targetTop);
   }
 
-  // idx nearest the viewport's vertical center — used to keep the same photo in
-  // view across a resize, since a column-count change moves every idx's position.
+  // Photo idx nearest the viewport's vertical center — used to keep the same
+  // photo in view across a resize or filter change, since either moves every
+  // photo's grid position.
   function galleryCenterIdx() {
+    if (!_galleryIndices.length) return _currentIdx;
     const viewport = document.getElementById('gallery-viewport');
     const rowHeight = galleryRowHeight();
     const centerY = viewport.scrollTop + viewport.clientHeight / 2;
     const row = Math.floor(centerY / rowHeight);
     const col = Math.floor(_galleryColumns / 2);
-    return Math.min(_total - 1, Math.max(0, row * _galleryColumns + col));
+    const pos = Math.min(_galleryIndices.length - 1, Math.max(0, row * _galleryColumns + col));
+    return _galleryIndices[pos];
   }
 
   function galleryHandleResize() {
@@ -1595,6 +1637,58 @@
     scrollGalleryToIdx(anchorIdx);
     renderGalleryWindow();
     loadGalleryImages();
+  }
+
+  function rebuildGalleryIndices() {
+    _galleryIndices = [];
+    for (let i = 0; i < _total; i++) {
+      if (!_galleryFilter.size || _galleryFilter.has(_ratings[i] || 0)) _galleryIndices.push(i);
+    }
+    for (const btn of document.querySelectorAll('.gallery-filter-btn[data-rating]')) {
+      btn.classList.toggle('active', _galleryFilter.has(parseInt(btn.dataset.rating, 10)));
+    }
+    document.getElementById('gallery-filter-all').classList.toggle('active', !_galleryFilter.size);
+    document.getElementById('gallery-title').textContent = _galleryFilter.size
+      ? `Gallery — ${_galleryIndices.length} of ${_total} photos`
+      : `Gallery — ${_total} photos`;
+  }
+
+  // Blank and unassign every pool slot, cancelling in-flight thumbnail fetches —
+  // needed whenever grid positions stop meaning what the slots think they mean.
+  function resetGalleryPool() {
+    for (const entry of _galleryPool) {
+      entry.img.removeAttribute('src');
+      entry.el.style.display = 'none';
+      entry.pos = null;
+      entry.idx = null;
+      entry.loadedIdx = null;
+    }
+  }
+
+  // Every grid position changes meaning on a filter change, so reset the pool
+  // and re-anchor on whichever photo was in the middle of the view.
+  function applyGalleryFilter() {
+    if (!_galleryOpen) { rebuildGalleryIndices(); return; }
+    const anchorIdx = galleryCenterIdx();
+    rebuildGalleryIndices();
+    resetGalleryPool();
+    layoutGallerySpacer();
+    ensureGalleryPool();
+    scrollGalleryToIdx(anchorIdx);
+    renderGalleryWindow();
+    loadGalleryImages();
+  }
+
+  function toggleGalleryFilter(rating) {
+    if (_galleryFilter.has(rating)) _galleryFilter.delete(rating);
+    else _galleryFilter.add(rating);
+    applyGalleryFilter();
+  }
+
+  function clearGalleryFilter() {
+    if (!_galleryFilter.size) return;
+    _galleryFilter.clear();
+    applyGalleryFilter();
   }
 
   function openGallery() {
@@ -1608,6 +1702,7 @@
 
     _galleryOpen = true;
     document.getElementById('gallery-overlay').classList.remove('hidden');
+    rebuildGalleryIndices();
     layoutGallerySpacer();
     ensureGalleryPool();
     scrollGalleryToIdx(_currentIdx);
@@ -1622,11 +1717,7 @@
     // them so they don't keep occupying connections the single-photo view (or a
     // freshly reopened gallery) needs, and reset the pool so reopening loads
     // fresh rather than leaving blanked-out tiles from a cancelled fetch.
-    for (const entry of _galleryPool) {
-      entry.img.removeAttribute('src');
-      entry.idx = null;
-      entry.loadedIdx = null;
-    }
+    resetGalleryPool();
   }
 
   document.getElementById('gallery-viewport').addEventListener('scroll', scheduleGalleryRender, { passive: true });

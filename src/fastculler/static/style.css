@@ -407,6 +407,47 @@ body {
   color: var(--white);
 }
 
+#gallery-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gallery-filter-label {
+  font-family: 'Oswald', sans-serif;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: var(--grey);
+  margin-right: 4px;
+}
+
+.gallery-filter-btn {
+  background: transparent;
+  border: 1px solid #555;
+  color: var(--grey);
+  padding: 4px 10px;
+  font-family: 'Oswald', sans-serif;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.2s ease-in-out, color 0.2s ease-in-out;
+}
+
+.gallery-filter-btn:hover {
+  border-color: var(--pale-blue);
+  color: var(--pale-blue);
+}
+
+.gallery-filter-btn.active {
+  border-color: var(--star-gold);
+  color: var(--star-gold);
+}
+
+#gallery-filter-all.active {
+  border-color: var(--pale-blue);
+  color: var(--pale-blue);
+}
+
 #gallery-viewport {
   flex: 1 1 auto;
   overflow-y: auto;
