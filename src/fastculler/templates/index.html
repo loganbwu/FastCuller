@@ -98,8 +98,18 @@
         <option value="5">5 stars &#9733;&#9733;&#9733;&#9733;&#9733;</option>
         <option value="-1">All photos</option>
         <option value="0">Unrated only</option>
+        <option value="exact">Exact ratings...</option>
       </select>
       <span id="copy-count" class="copy-count-badge"></span>
+    </div>
+    <div class="modal-row" id="copy-exact-row" style="display:none">
+      <span class="modal-label">Ratings:</span>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="0" onclick="toggleCopyExact(0)">Unrated</button>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="1" onclick="toggleCopyExact(1)">&#9733;1</button>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="2" onclick="toggleCopyExact(2)">&#9733;2</button>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="3" onclick="toggleCopyExact(3)">&#9733;3</button>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="4" onclick="toggleCopyExact(4)">&#9733;4</button>
+      <button class="gallery-filter-btn copy-exact-btn" data-rating="5" onclick="toggleCopyExact(5)">&#9733;5</button>
     </div>
     <div class="modal-row">
       <span class="modal-label">To:</span>
@@ -1145,14 +1155,38 @@
 
   // ── Copy photos modal ──────────────────────────────────────────────────────
 
+  // Ratings ticked under "Exact ratings..." (0 = unrated); kept across opens.
+  const _copyExact = new Set();
+
+  function _copyIsExact() {
+    return document.getElementById('copy-rating-select').value === 'exact';
+  }
+
+  function toggleCopyExact(rating) {
+    if (_copyExact.has(rating)) _copyExact.delete(rating);
+    else _copyExact.add(rating);
+    updateCopyCount();
+  }
+
   function updateCopyCount() {
-    const rating = parseInt(document.getElementById('copy-rating-select').value, 10);
-    const count = rating === -1
-      ? _total
-      : rating === 0
-        ? _ratings.filter((r, i) => i < _total && (r || 0) === 0).length
-        : _ratings.filter((r, i) => i < _total && (r || 0) >= rating).length;
+    const exact = _copyIsExact();
+    document.getElementById('copy-exact-row').style.display = exact ? '' : 'none';
+    for (const btn of document.querySelectorAll('.copy-exact-btn')) {
+      btn.classList.toggle('active', _copyExact.has(parseInt(btn.dataset.rating, 10)));
+    }
+    let count;
+    if (exact) {
+      count = _ratings.filter((r, i) => i < _total && _copyExact.has(r || 0)).length;
+    } else {
+      const rating = parseInt(document.getElementById('copy-rating-select').value, 10);
+      count = rating === -1
+        ? _total
+        : rating === 0
+          ? _ratings.filter((r, i) => i < _total && (r || 0) === 0).length
+          : _ratings.filter((r, i) => i < _total && (r || 0) >= rating).length;
+    }
     document.getElementById('copy-count').textContent = `${count} photo${count !== 1 ? 's' : ''}`;
+    document.getElementById('btn-copy-go').disabled = !_copyDest || (exact && !_copyExact.size);
   }
 
   function openCopyModal() {
@@ -1161,7 +1195,6 @@
     document.getElementById('copy-modal-status').textContent = '';
     document.getElementById('copy-progress-bar').style.display = 'none';
     document.getElementById('copy-progress-bar-fill').style.width = '0%';
-    document.getElementById('btn-copy-go').disabled = true;
     updateCopyCount();
     document.getElementById('copy-modal-backdrop').classList.remove('hidden');
   }
@@ -1176,13 +1209,16 @@
     if (data.path) {
       _copyDest = data.path;
       document.getElementById('copy-dest-path').textContent = data.path;
-      document.getElementById('btn-copy-go').disabled = false;
+      updateCopyCount();
     }
   }
 
   async function doCopy() {
     if (!_copyDest) return;
-    const rating = parseInt(document.getElementById('copy-rating-select').value, 10);
+    const filter = _copyIsExact()
+      ? {ratings: [..._copyExact]}
+      : {rating: parseInt(document.getElementById('copy-rating-select').value, 10)};
+    if (filter.ratings && !filter.ratings.length) return;
     const statusEl = document.getElementById('copy-modal-status');
     const progressEl = document.getElementById('copy-progress-bar-fill');
     statusEl.textContent = 'Starting...';
@@ -1195,7 +1231,7 @@
       const res = await fetch('/api/copy', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({rating, destination: _copyDest}),
+        body: JSON.stringify({...filter, destination: _copyDest}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

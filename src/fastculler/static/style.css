@@ -558,6 +558,10 @@ body {
 
 .modal-label { color: var(--grey); min-width: 80px; }
 
+/* exact-rating toggles in the copy modal reuse .gallery-filter-btn */
+#copy-exact-row { gap: 4px; }
+#copy-exact-row .modal-label { margin-right: 8px; }
+
 #copy-rating-select {
   background: #2a2a2a;
   border: 1px solid #555;

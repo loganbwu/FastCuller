@@ -575,6 +575,59 @@ class TestFlaskApp:
             assert state is not None, "Session never reached status=ready"
             assert state['filename'] == 'IMG_0002.cr3'
 
+    def _ready_session(self, c, tmp_path, ratings):
+        """Start a session over fake CR3s with the given XMP ratings and wait
+        until it's ready."""
+        import time
+        from fastculler.main import write_xmp_rating
+        for i, r in enumerate(ratings):
+            cr3 = tmp_path / f"IMG_{i:04d}.cr3"
+            cr3.touch()
+            if r:
+                write_xmp_rating(cr3, r)
+        resp = c.post('/api/start', json={'path': str(tmp_path)})
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            r = c.get('/api/state').get_json()
+            if r['status'] == 'ready':
+                return
+            if r['status'] == 'error':
+                pytest.fail(f"Session startup error: {r.get('message')}")
+            time.sleep(0.05)
+        pytest.fail("Session never reached status=ready")
+
+    @pytest.mark.parametrize("body, expected", [
+        ({'ratings': [2]}, {'IMG_0002.cr3'}),
+        ({'ratings': [1, 3]}, {'IMG_0001.cr3', 'IMG_0003.cr3'}),
+        ({'ratings': [0, 5]}, {'IMG_0000.cr3', 'IMG_0005.cr3'}),
+        ({'rating': 3}, {'IMG_0003.cr3', 'IMG_0004.cr3', 'IMG_0005.cr3'}),
+    ])
+    def test_copy_by_exact_ratings(self, tmp_path, body, expected):
+        from fastculler.web import create_app
+        src = tmp_path / "src"
+        dest = tmp_path / "dest"
+        src.mkdir()
+        dest.mkdir()
+        app = create_app()
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            self._ready_session(c, src, [0, 1, 2, 3, 4, 5])
+            resp = c.post('/api/copy', json={**body, 'destination': str(dest)})
+            assert resp.status_code == 200
+            resp.get_data()  # drain the streamed response
+        assert {p.name for p in dest.glob('*.cr3')} == expected
+
+    @pytest.mark.parametrize("ratings", [[], [6], ['2'], 'abc'])
+    def test_copy_rejects_bad_exact_ratings(self, tmp_path, ratings):
+        from fastculler.web import create_app
+        app = create_app()
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            self._ready_session(c, tmp_path, [0])
+            resp = c.post('/api/copy', json={'ratings': ratings, 'destination': str(tmp_path)})
+            assert resp.status_code == 400
+
     def test_navigate_without_session(self, client):
         resp = client.post('/api/navigate', json={'idx': 0})
         assert resp.status_code == 400

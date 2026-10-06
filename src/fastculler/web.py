@@ -712,25 +712,38 @@ def create_app() -> Flask:
             return jsonify({"error": "no active session"}), 400
         data = request.json or {}
         rating = data.get("rating")
+        # Optional exact-match list (e.g. [1, 3] = only 1-star and 3-star photos,
+        # 0 = unrated); takes precedence over the "N stars and above" rating.
+        ratings = data.get("ratings")
         dest_str = data.get("destination", "")
 
-        if not isinstance(rating, int):
+        if ratings is not None:
+            if (not isinstance(ratings, list) or not ratings
+                    or not all(isinstance(r, int) and 0 <= r <= 5 for r in ratings)):
+                return jsonify({"error": "ratings must be a non-empty list of 0–5"}), 400
+        elif not isinstance(rating, int):
             return jsonify({"error": "invalid rating"}), 400
-        if rating != -1 and not (0 <= rating <= 5):
+        elif rating != -1 and not (0 <= rating <= 5):
             return jsonify({"error": "rating must be 0–5 (or -1 for all)"}), 400
         dest = Path(dest_str).expanduser().resolve()
         if not dest.exists():
             return jsonify({"error": f"Destination does not exist: {dest}"}), 400
 
         with state._lock:
-            if rating == -1:
+            if ratings is not None:
+                wanted = set(ratings)
+                to_copy = [f for f in state.files if state.ratings.get(f, 0) in wanted]
+            elif rating == -1:
                 to_copy = list(state.files)
             elif rating == 0:
                 to_copy = [f for f in state.files if state.ratings.get(f, 0) == 0]
             else:
                 to_copy = [f for f in state.files if state.ratings.get(f, 0) >= rating]
 
-        rating_label = "all" if rating == -1 else _rating_str(rating)
+        if ratings is not None:
+            rating_label = ", ".join(_rating_str(r) for r in sorted(set(ratings)))
+        else:
+            rating_label = "all" if rating == -1 else _rating_str(rating)
         total = len(to_copy)
         print(f"\n{_BOLD}Copying{_RESET} {total} file(s) ({rating_label})"
               f" → {_CYAN}{dest}{_RESET}")
