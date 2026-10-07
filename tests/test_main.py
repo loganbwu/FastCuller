@@ -597,13 +597,12 @@ class TestFlaskApp:
             time.sleep(0.05)
         pytest.fail("Session never reached status=ready")
 
-    @pytest.mark.parametrize("body, expected", [
-        ({'ratings': [2]}, {'IMG_0002.cr3'}),
-        ({'ratings': [1, 3]}, {'IMG_0001.cr3', 'IMG_0003.cr3'}),
-        ({'ratings': [0, 5]}, {'IMG_0000.cr3', 'IMG_0005.cr3'}),
-        ({'rating': 3}, {'IMG_0003.cr3', 'IMG_0004.cr3', 'IMG_0005.cr3'}),
+    @pytest.mark.parametrize("ratings, expected", [
+        ([2], {'IMG_0002.cr3'}),
+        ([1, 3], {'IMG_0001.cr3', 'IMG_0003.cr3'}),
+        ([0, 5], {'IMG_0000.cr3', 'IMG_0005.cr3'}),
     ])
-    def test_copy_by_exact_ratings(self, tmp_path, body, expected):
+    def test_copy_by_exact_ratings(self, tmp_path, ratings, expected):
         from fastculler.web import create_app
         src = tmp_path / "src"
         dest = tmp_path / "dest"
@@ -613,12 +612,12 @@ class TestFlaskApp:
         app.config["TESTING"] = True
         with app.test_client() as c:
             self._ready_session(c, src, [0, 1, 2, 3, 4, 5])
-            resp = c.post('/api/copy', json={**body, 'destination': str(dest)})
+            resp = c.post('/api/copy', json={'ratings': ratings, 'destination': str(dest)})
             assert resp.status_code == 200
             resp.get_data()  # drain the streamed response
         assert {p.name for p in dest.glob('*.cr3')} == expected
 
-    @pytest.mark.parametrize("ratings", [[], [6], ['2'], 'abc'])
+    @pytest.mark.parametrize("ratings", [None, [], [6], ['2'], 'abc'])
     def test_copy_rejects_bad_exact_ratings(self, tmp_path, ratings):
         from fastculler.web import create_app
         app = create_app()
@@ -676,7 +675,7 @@ class TestFlaskApp:
             assert sorted(names) == ['photo_000.cr3', 'photo_001.cr3', 'photo_002.cr3']
 
     def test_copy_without_session(self, client):
-        resp = client.post('/api/copy', json={'rating': 1, 'destination': '/tmp'})
+        resp = client.post('/api/copy', json={'ratings': [1], 'destination': '/tmp'})
         assert resp.status_code == 400
 
     def test_copy_preserves_subfolder_structure(self, tmp_path, monkeypatch):
@@ -725,7 +724,7 @@ class TestFlaskApp:
             assert state is not None
             assert state['total'] == 2
 
-            resp = c.post('/api/copy', json={'rating': -1, 'destination': str(dest)})
+            resp = c.post('/api/copy', json={'ratings': [0, 1, 2, 3, 4, 5], 'destination': str(dest)})
             assert resp.status_code == 200
             lines = [line for line in resp.data.decode().splitlines() if line]
             final = json.loads(lines[-1])

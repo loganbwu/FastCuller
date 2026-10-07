@@ -16,7 +16,7 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 - Keyboard shortcuts for efficient culling
 - Background prefetch of images and thumbnails, with in-memory LRU caching
 - On-disk thumbnail cache (persists across restarts) + `fastculler-build-thumbnails` CLI tool to pre-generate all of them for a large library
-- Copy rated photos (and XMP files) to a chosen destination — either "N stars and above", or an exact set of ratings (e.g. only 2 stars, or 1 and 3 stars)
+- Copy photos (and XMP files) to a chosen destination, choosing any combination of ratings to include (e.g. only 2 stars, or 1 and 3 stars, or unrated)
 - Export XMP sidecar files only (no photos), preserving folder structure — useful for merging a collaborator's ratings into your own copy of the same photos
 - Fullscreen mode (button or `F` key)
 
@@ -86,7 +86,7 @@ tests/
 | `/api/filenames` | GET | Filename for every photo in the session, in order — used by the gallery grid |
 | `/api/navigate` | POST | Navigate to a photo by index |
 | `/api/rate` | POST | Rate current photo, optionally advance |
-| `/api/copy` | POST | Copy photos by rating to a destination folder (`rating`: N and above, 0 = unrated, -1 = all; or `ratings`: exact list, e.g. `[1, 3]`) |
+| `/api/copy` | POST | Copy photos by rating to a destination folder (`ratings`: exact list to include, e.g. `[1, 3]`; 0 = unrated) |
 | `/api/export-xmp` | POST | Export XMP sidecars only to a destination, preserving folder structure |
 
 ## Prefetch Strategy

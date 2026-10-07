@@ -558,18 +558,10 @@ body {
 
 .modal-label { color: var(--grey); min-width: 80px; }
 
-/* exact-rating toggles in the copy modal reuse .gallery-filter-btn */
-#copy-exact-row { gap: 4px; }
-#copy-exact-row .modal-label { margin-right: 8px; }
-
-#copy-rating-select {
-  background: #2a2a2a;
-  border: 1px solid #555;
-  color: var(--white);
-  padding: 5px 10px;
-  font-size: 13px;
-  flex: 1;
-}
+/* rating toggles in the copy modal reuse .gallery-filter-btn */
+#copy-rating-row { gap: 4px; }
+#copy-rating-row .modal-label { margin-right: 8px; }
+#copy-rating-row .copy-count-badge { margin-left: 8px; }
 
 #copy-dest-path {
   color: var(--paragraph-text-color);
@@ -608,7 +600,7 @@ body {
   justify-content: flex-end;
 }
 
-/* count badge next to copy rating select */
+/* count badge next to copy rating toggles */
 .copy-count-badge {
   color: var(--pale-blue);
   font-size: 12px;
