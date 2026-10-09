@@ -13,6 +13,7 @@ from PIL import Image
 _DTO_TAG         = 36867   # ExifIFD.DateTimeOriginal
 _ORIENTATION_TAG = 274     # IFD0.Orientation
 _CANON_UUID = bytes.fromhex('85c0b687820f11e08111f4ce462b6a48')
+_XMP_UUID   = bytes.fromhex('be7acfcb97a942e89c71999491e3afac')   # embedded XMP packet
 
 _ORIENTATION_TO_TRANSPOSE = {
     2: Image.Transpose.FLIP_LEFT_RIGHT,
@@ -97,10 +98,9 @@ def _read_cr3_header(cr3_path: Path, max_bytes: int = 12_000_000) -> bytes:
 
 # ── Metadata extraction ───────────────────────────────────────────────────────
 
-def get_capture_time(cr3_path: Path) -> str:
-    """Return DateTimeOriginal string ('YYYY:MM:DD HH:MM:SS') or '' on failure."""
+def _capture_time_from_header(data: bytes) -> str:
     try:
-        cmt2 = _cr3_cmt_box(_read_cr3_header(cr3_path), b'CMT2')
+        cmt2 = _cr3_cmt_box(data, b'CMT2')
         if cmt2 is not None:
             ts = _read_tiff_tag(cmt2, _DTO_TAG)
             if ts:
@@ -108,6 +108,44 @@ def get_capture_time(cr3_path: Path) -> str:
     except Exception:
         pass
     return ''
+
+
+def _camera_rating_from_header(data: bytes) -> int:
+    """Return the in-camera xmp:Rating from the CR3's embedded XMP packet, or 0.
+
+    Canon stores it in a top-level ISOBMFF 'uuid' box (standard XMP UUID), just
+    after 'moov', as e.g. <xmp:Rating>3</xmp:Rating>.
+    """
+    try:
+        for btype, s, e in _iter_isobmff_boxes(data, 0, len(data)):
+            if btype == b'uuid' and data[s:s + 16] == _XMP_UUID:
+                packet = data[s + 16:e].decode('utf-8', 'replace')
+                m = _XMP_RATING_RE.search(packet) or _XMP_RATING_ATTR_RE.search(packet)
+                return int(m.group(1)) if m else 0
+    except Exception:
+        pass
+    return 0
+
+
+def get_capture_time(cr3_path: Path) -> str:
+    """Return DateTimeOriginal string ('YYYY:MM:DD HH:MM:SS') or '' on failure."""
+    try:
+        return _capture_time_from_header(_read_cr3_header(cr3_path))
+    except Exception:
+        return ''
+
+
+def get_camera_metadata(cr3_path: Path) -> tuple:
+    """Return (capture_time, camera_rating) from a single CR3 header read.
+
+    capture_time is as for get_capture_time(); camera_rating is the rating set
+    on the camera body (0 if unrated or unreadable).
+    """
+    try:
+        data = _read_cr3_header(cr3_path)
+    except Exception:
+        return '', 0
+    return _capture_time_from_header(data), _camera_rating_from_header(data)
 
 
 def get_orientation(cr3_path: Path) -> int:
@@ -291,7 +329,7 @@ def read_xmp_capture_time(cr3_path: Path) -> str:
     matter. Lets callers sort by capture time from the (small, fast-to-read) sidecar
     instead of re-reading each CR3's embedded EXIF via get_capture_time(), which is
     accurate but costs a large per-file read. Populate sidecars with the
-    fastculler-write-dates CLI tool, or by exporting from Lightroom/ExifTool.
+    fastculler-write-xmp CLI tool, or by exporting from Lightroom/ExifTool.
     """
     xmp_path = cr3_path.with_suffix('.xmp')
     if not xmp_path.exists():
@@ -378,6 +416,16 @@ def read_xmp_rating(cr3_path: Path) -> int:
     except Exception:
         pass
     return 0
+
+
+def has_xmp_rating(cr3_path: Path) -> bool:
+    """Return True if the sidecar has any xmp:Rating tag, including an explicit 0."""
+    xmp_path = cr3_path.with_suffix('.xmp')
+    try:
+        content = xmp_path.read_text()
+    except Exception:
+        return False
+    return bool(_XMP_RATING_RE.search(content) or _XMP_RATING_ATTR_RE.search(content))
 
 
 def write_xmp_rating(cr3_path: Path, rating: int) -> None:

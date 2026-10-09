@@ -505,7 +505,7 @@ def create_app() -> Flask:
 
                 # Sort by capture date from the XMP sidecar when one is present — a
                 # small, fast text read, unlike get_capture_time()'s ~12 MB-per-file
-                # CR3 header read. Sidecars are populated via `fastculler-write-dates`,
+                # CR3 header read. Sidecars are populated via `fastculler-write-xmp`,
                 # or by Lightroom/ExifTool. Falls back to file modification time (set
                 # by the camera) for files with no such sidecar — essentially instant,
                 # but wrong if mtime was reset during a file transfer.

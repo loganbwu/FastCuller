@@ -11,9 +11,14 @@ from pathlib import Path
 
 import pytest
 
+from fastculler import xmp_cli
 from fastculler.main import (
+    _XMP_UUID,
+    _camera_rating_from_header,
     _cr3_cmt_box,
     _read_tiff_tag,
+    get_camera_metadata,
+    has_xmp_rating,
     read_xmp_capture_time,
     read_xmp_rating,
     write_xmp_capture_time,
@@ -395,6 +400,118 @@ class TestReadTiffTag:
 
     def test_returns_none_for_empty_data(self):
         assert _read_tiff_tag(b'', 274) is None
+
+
+# ── In-camera rating (embedded XMP) tests ─────────────────────────────────────
+
+def _box(btype: bytes, payload: bytes) -> bytes:
+    return struct.pack('>I', 8 + len(payload)) + btype + payload
+
+
+def _fake_cr3(rating_xml: str = None) -> bytes:
+    """Minimal CR3-shaped ISOBMFF: ftyp, empty moov, optional XMP uuid box, mdat."""
+    data = _box(b'ftyp', b'crx \x00\x00\x00\x01') + _box(b'moov', b'')
+    if rating_xml is not None:
+        packet = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description>'
+                  f'{rating_xml}</rdf:Description></rdf:RDF></x:xmpmeta>').encode()
+        data += _box(b'uuid', _XMP_UUID + packet)
+    return data + _box(b'mdat', b'\x00' * 16)
+
+
+class TestCameraRating:
+    def test_reads_element_form(self):
+        assert _camera_rating_from_header(_fake_cr3('<xmp:Rating>3</xmp:Rating>')) == 3
+
+    def test_reads_attribute_form(self):
+        assert _camera_rating_from_header(_fake_cr3('<rdf:Description xmp:Rating="5"/>')) == 5
+
+    def test_zero_when_unrated(self):
+        assert _camera_rating_from_header(_fake_cr3('<xmp:Rating>0</xmp:Rating>')) == 0
+
+    def test_zero_when_no_xmp_box(self):
+        assert _camera_rating_from_header(_fake_cr3()) == 0
+
+    def test_zero_for_garbage(self):
+        assert _camera_rating_from_header(b'not a cr3 file') == 0
+
+    def test_get_camera_metadata_reads_file(self, tmp_path):
+        cr3 = tmp_path / "a.CR3"
+        cr3.write_bytes(_fake_cr3('<xmp:Rating>2</xmp:Rating>'))
+        assert get_camera_metadata(cr3) == ('', 2)
+
+    def test_get_camera_metadata_missing_file(self, tmp_path):
+        assert get_camera_metadata(tmp_path / "missing.CR3") == ('', 0)
+
+
+class TestHasXmpRating:
+    def test_false_without_sidecar(self, tmp_path):
+        assert not has_xmp_rating(tmp_path / "a.CR3")
+
+    def test_true_for_explicit_zero(self, tmp_path):
+        cr3 = tmp_path / "a.CR3"
+        write_xmp_rating(cr3, 0)
+        assert has_xmp_rating(cr3)
+
+    def test_false_for_date_only_sidecar(self, tmp_path):
+        cr3 = tmp_path / "a.CR3"
+        write_xmp_capture_time(cr3, '2024:06:14 10:30:45')
+        assert not has_xmp_rating(cr3)
+
+
+# ── fastculler-write-xmp CLI tests ────────────────────────────────────────────
+
+class TestXmpCliProcess:
+    @pytest.fixture
+    def cr3(self, tmp_path):
+        p = tmp_path / "a.CR3"
+        p.write_bytes(b'')
+        return p
+
+    def _camera(self, monkeypatch, capture_time, rating):
+        calls = []
+        def fake(path):
+            calls.append(path)
+            return capture_time, rating
+        monkeypatch.setattr(xmp_cli, 'get_camera_metadata', fake)
+        return calls
+
+    def test_writes_date_and_imports_rating(self, cr3, monkeypatch):
+        self._camera(monkeypatch, '2024:06:14 10:30:45', 4)
+        assert xmp_cli._process(cr3, force=False) == ('written', 'imported')
+        assert read_xmp_capture_time(cr3) == '2024-06-14 10:30:45'
+        assert read_xmp_rating(cr3) == 4
+
+    def test_unrated_camera_writes_explicit_zero_so_reruns_skip(self, cr3, monkeypatch):
+        calls = self._camera(monkeypatch, '2024:06:14 10:30:45', 0)
+        assert xmp_cli._process(cr3, force=False) == ('written', 'unrated')
+        assert has_xmp_rating(cr3) and read_xmp_rating(cr3) == 0
+        assert xmp_cli._process(cr3, force=False) == ('skipped', 'kept')
+        assert len(calls) == 1
+
+    def test_existing_sidecar_rating_kept_even_with_force(self, cr3, monkeypatch):
+        write_xmp_rating(cr3, 0)
+        self._camera(monkeypatch, '2024:06:14 10:30:45', 5)
+        assert xmp_cli._process(cr3, force=True) == ('written', 'kept')
+        assert read_xmp_rating(cr3) == 0
+
+    def test_rating_imported_when_date_already_tagged(self, cr3, monkeypatch):
+        write_xmp_capture_time(cr3, '2020:01:01 00:00:00')
+        self._camera(monkeypatch, '2024:06:14 10:30:45', 2)
+        assert xmp_cli._process(cr3, force=False) == ('skipped', 'imported')
+        assert read_xmp_capture_time(cr3) == '2020-01-01 00:00:00'
+        assert read_xmp_rating(cr3) == 2
+
+    def test_fully_tagged_sidecar_skips_cr3_read(self, cr3, monkeypatch):
+        write_xmp_capture_time(cr3, '2020:01:01 00:00:00')
+        write_xmp_rating(cr3, 1)
+        calls = self._camera(monkeypatch, '2024:06:14 10:30:45', 5)
+        assert xmp_cli._process(cr3, force=False) == ('skipped', 'kept')
+        assert calls == []
+
+    def test_no_exif_and_unrated_creates_no_sidecar(self, cr3, monkeypatch):
+        self._camera(monkeypatch, '', 0)
+        assert xmp_cli._process(cr3, force=False) == ('no-exif', 'unrated')
+        assert not cr3.with_suffix('.xmp').exists()
 
 
 # ── Parallel scan-with-progress tests ─────────────────────────────────────────
