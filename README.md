@@ -10,7 +10,8 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 - Rate photos with 0–5 stars (written to XMP sidecar files)
 - Filmstrip view with star overlays, virtualized the same way as the gallery grid so it stays responsive at any library size
 - Gallery grid view (`G` key or the Gallery button) — a Lightroom-style scrollable grid
-  of the whole library for visually finding a photo, click one to jump straight to it
+  of the whole library for visually finding a photo, click one to jump straight to it, with a
+  star-rating filter to show only photos with selected ratings
 - Rating summary in the header (count per star tier)
 - EXIF metadata overlay on main image (ISO, shutter, aperture, focal length, lens)
 - Keyboard shortcuts for efficient culling
@@ -28,10 +29,12 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 | `` ` `` | Rate 0 stars, advance to next photo |
 | `Shift` + `1`–`5` | Rate N stars without advancing |
 | `Shift` + `` ` `` | Rate 0 stars without advancing |
+| `Up` | Increase rating by 1 star (max 5), advance to next photo |
+| `Down` | Rate 0 stars without advancing |
 | `Right` | Go to next photo |
 | `Left` | Go to previous photo |
-| `Right` + `1` | Go to next photo with 1 star |
-| `Left` + `1` | Go to previous photo with 1 star |
+| `Right` + `1`–`5` | Go to next photo with N stars |
+| `Left` + `1`–`5` | Go to previous photo with N stars |
 | `Right` + `` ` `` | Go to next photo with 0 stars |
 | `Left` + `` ` `` | Go to previous photo with 0 stars |
 | `Home` | Jump to first unrated photo |
@@ -41,6 +44,16 @@ A fast photo culling application for CR3 files, implemented as a Flask web appli
 | `G` | Toggle gallery grid view |
 | `?` | Show keyboard shortcut help |
 | `Esc` | Close modals / reset zoom / exit fullscreen |
+| `Space` | Reset zoom |
+
+In the gallery grid view:
+
+| Key | Action |
+|-----|--------|
+| `` ` ``, `1`–`5` | Toggle showing unrated / N-star photos |
+| `A` | Show all photos (clear the star filter) |
+| `Space` | Open the highlighted photo |
+| `G` / `Esc` | Close the gallery |
 
 ## Trackpad Gestures (main image)
 
@@ -56,7 +69,7 @@ Zoom resets automatically when navigating to a different photo.
 
 ```
 src/fastculler/
-├── main.py        CR3 image reading, capture time, XMP rating/capture-time read/write
+├── main.py        CR3 image reading, capture time and in-camera rating, XMP rating/capture-time read/write
 ├── web.py         Flask app, CullerState, prefetch, API routes
 ├── thumb_cache.py On-disk thumbnail cache
 ├── xmp_cli.py     fastculler-write-xmp CLI tool
@@ -68,7 +81,7 @@ src/fastculler/
     └── style.css  Dark UI (based on AutoCropper)
 tests/
 ├── conftest.py    Sandboxes the on-disk thumbnail cache for the whole test run
-└── test_main.py   Unit tests for image and XMP functions
+└── test_main.py   Unit tests for image and XMP functions and the fastculler-write-xmp CLI
 ```
 
 ## API Routes
@@ -86,6 +99,8 @@ tests/
 | `/api/filenames` | GET | Filename for every photo in the session, in order — used by the gallery grid |
 | `/api/navigate` | POST | Navigate to a photo by index |
 | `/api/rate` | POST | Rate current photo, optionally advance |
+| `/api/navigate-by-rating` | POST | Jump to the next/previous photo with a given rating |
+| `/api/pick-destination` | GET | macOS destination folder picker (osascript) |
 | `/api/copy` | POST | Copy photos by rating to a destination folder (`ratings`: exact list to include, e.g. `[1, 3]`; 0 = unrated) |
 | `/api/export-xmp` | POST | Export XMP sidecars only to a destination, preserving folder structure |
 
@@ -123,6 +138,9 @@ or holds tens of thousands of thumbnails in memory at once. Escape or clicking a
 closes the grid; keyboard shortcuts are disabled while it's open (nothing to rate or
 navigate to while you're just looking for a photo).
 
+The toolbar's **Show** toggles (Unrated, 1–5 stars, All), or the matching keys, restrict the
+grid to photos with the selected ratings.
+
 Each tile shows its filename underneath the thumbnail. A tile whose photo isn't loaded
 yet shows a plain grey box rather than a previous or unrelated photo — during a fast
 scroll, the actual thumbnail fetch is deferred a moment until scrolling settles (a
@@ -140,7 +158,7 @@ modification time. Once a thumbnail's been generated once — through normal use
 running:
 
 ```bash
-fastculler-build-thumbnails ~/Photos/2024-06-14-shoot
+rye run fastculler-build-thumbnails ~/Photos/2024-06-14-shoot
 ```
 
 — it's never decoded again, regardless of restarts or how far you scroll the filmstrip.
@@ -192,7 +210,7 @@ per file), so FastCuller doesn't do that automatically on every load. Instead, r
 XMP sidecar — after that, loading the folder sorts correctly without the per-file cost:
 
 ```bash
-fastculler-write-xmp ~/Photos/2024-06-14-shoot
+rye run fastculler-write-xmp ~/Photos/2024-06-14-shoot
 ```
 
 Files that already have a cached capture date are skipped by default; pass `--force` to
@@ -215,7 +233,7 @@ Lightroom).
 
 ## Setup
 
-### First-time setup (no developer tools required)
+### First-time setup
 
 These steps assume a Mac with nothing developer-related installed yet — no Homebrew, no Python, no git.
 
@@ -248,83 +266,19 @@ These steps assume a Mac with nothing developer-related installed yet — no Hom
 
 The app opens in the browser at `http://localhost:5002`. Leave the Terminal window open while using FastCuller — closing it stops the app.
 
-### Troubleshooting: `dyld: ... Symbol not found: ___darwin_check_fd_set_overflow`
-
-If step 2 above fails partway through with an error message containing this text, Rye's own
-installer can't run on this Mac's macOS version — Rye (and current Python installers generally)
-require **macOS 11 (Big Sur) or later**. This isn't a FastCuller problem, and it isn't specific to
-whichever Python version you're offered during setup. It shows up on older Macs still running
-macOS 10.13 (High Sierra) or earlier that can't be upgraded further.
-
-**First, check if the Mac can just be updated to macOS 11 or later** — that's the simplest fix,
-and worth ruling out even if it seems unlikely:
-
-1. Click the Apple menu (top-left corner) → **About This Mac**, and note the macOS version.
-2. Check for an available upgrade:
-   - **macOS 13 (Ventura) or later:** Apple menu → **System Settings** → **General** → **Software
-     Update**.
-   - **macOS 10.14–12 (Mojave through Monterey):** Apple menu → **System Preferences** →
-     **Software Update**.
-   - **macOS 10.13 (High Sierra) or earlier:** open the **App Store** app and click **Updates** in
-     the toolbar.
-3. If a newer macOS is offered, install it, restart the Mac, then go back to step 1 of Setup above
-   and try again from the beginning.
-
-**If no macOS update is available** (common on older hardware — some Macs can't go past a certain
-version), **Rye itself can't be used at all** — the `dyld` error is Rye's own program crashing on
-startup (look for `"$TEMP_FILE" self install` in the error output: that's Rye's own installer
-binary aborting, not a Python it's trying to download). No toolchain setting fixes that, because
-Rye never gets far enough to read it. The fix is to skip Rye completely and run FastCuller with a
-plain Python instead. This replaces the whole "First-time setup" section above — don't mix the two
-sets of steps together, just follow this list start to finish:
-
-1. **Open Terminal.** Press `Cmd + Space`, type `Terminal`, press Enter.
-2. **Install Python 3.9.13** — the last Python release with an installer for macOS this old.
-   FastCuller supports running on Python 3.9 for exactly this situation. Paste this into Terminal
-   and press Enter:
-   ```bash
-   curl -sSf -o /tmp/python-3.9.13.pkg https://www.python.org/ftp/python/3.9.13/python-3.9.13-macosx10.9.pkg && \
-   sudo installer -pkg /tmp/python-3.9.13.pkg -target /
-   ```
-   Terminal will show `Password:` and wait — type your Mac's login password (it won't show
-   anything as you type, that's normal) and press Enter. The last line printed should say
-   `The install was successful` or `The upgrade was successful`.
-3. **Create a private space for FastCuller's dependencies** (a "virtual environment") using that
-   Python. Paste this and press Enter — it only needs to be done once, ever, even if you run
-   FastCuller many times later:
-   ```bash
-   /Library/Frameworks/Python.framework/Versions/3.9/bin/python3.9 -m venv ~/fastculler-env
-   ```
-4. **Get the code.** Go to https://github.com/loganbwu/FastCuller, click the green `Code` button →
-   `Download ZIP`, then double-click the downloaded file in Finder to unzip it. Note where it lands
-   (usually `~/Downloads/FastCuller-main`).
-5. **Move into the project folder** in Terminal:
-   ```bash
-   cd ~/Downloads/FastCuller-main
-   ```
-6. **Install FastCuller's dependencies and run it.** Paste this and press Enter:
-   ```bash
-   source ~/fastculler-env/bin/activate && pip install -e . && fastculler
-   ```
-   Once it's active, your Terminal prompt will start with `(fastculler-env)` — that confirms it
-   worked. `pip install -e .` will take a minute or so the first time.
-
-The app opens in the browser at `http://localhost:5002`, exactly like the normal setup.
-
 ### Every time after that
 
-**If you set up FastCuller normally with Rye:** open Terminal, `cd` into the FastCuller folder, then:
+Open Terminal, `cd` into the FastCuller folder, then:
 
 ```bash
 rye run fastculler
 ```
 
-**If you used the Python 3.9 fallback above:** open Terminal, then paste this (adjusting the
-project folder path to wherever you placed it):
+### Updating
 
-```bash
-source ~/fastculler-env/bin/activate && cd ~/Downloads/FastCuller-main && fastculler
-```
+After downloading a newer version (or running `git pull`), run `rye sync` once in the
+FastCuller folder before `rye run fastculler`. This picks up new dependencies and command
+names — for example, `fastculler-write-dates` has been renamed to `fastculler-write-xmp`.
 
 ## Usage
 
@@ -348,9 +302,6 @@ EXIF capture date (and any star rating set on the camera) into each photo's `.xm
 ```bash
 rye run fastculler-write-xmp ~/Photos/2024-06-14-shoot
 ```
-
-(Drop `rye run` if you used the Python 3.9 fallback setup — just `fastculler-write-xmp ...`
-with the same environment activated as when you run `fastculler`.)
 
 ### Pre-warming thumbnails for a large folder
 
@@ -409,5 +360,8 @@ than sent to you directly), they don't need to send you the photos back — just
 - [x] Gallery grid view (virtualized, scroll to find a photo, click to jump to it)
 - [x] Filmstrip rewritten to the same virtualized-pool approach, replacing the old per-photo DOM nodes and custom scroll-animation code
 - [x] Parallelized folder scan + real loading-bar progress; prefetch deferred until the first photo request; bounded rating-neighbour prefetch search
+- [x] Up/Down arrow rating shortcuts
+- [x] Star-rating filter in the gallery grid view
+- [x] Copy photos by an exact set of star ratings
 - [ ] Filter filmstrip by rating
 - [ ] Reject flag (X key → rating -1)
