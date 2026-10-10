@@ -84,26 +84,6 @@ tests/
 └── test_main.py   Unit tests for image and XMP functions and the fastculler-write-xmp CLI
 ```
 
-## API Routes
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/` | GET | Main page |
-| `/api/pick-folder` | GET | macOS folder picker (osascript) |
-| `/api/start` | POST | Load folder, sort files by capture time |
-| `/api/state` | GET | Full session state (file list, ratings, current index) |
-| `/api/events` | GET | SSE stream for live updates |
-| `/api/image/<idx>` | GET | Full-size JPEG preview for photo at index |
-| `/api/thumbnail/<idx>` | GET | Small thumbnail for filmstrip |
-| `/api/exif/<idx>` | GET | EXIF metadata dict for photo at index |
-| `/api/filenames` | GET | Filename for every photo in the session, in order — used by the gallery grid |
-| `/api/navigate` | POST | Navigate to a photo by index |
-| `/api/rate` | POST | Rate current photo, optionally advance |
-| `/api/navigate-by-rating` | POST | Jump to the next/previous photo with a given rating |
-| `/api/pick-destination` | GET | macOS destination folder picker (osascript) |
-| `/api/copy` | POST | Copy photos by rating to a destination folder (`ratings`: exact list to include, e.g. `[1, 3]`; 0 = unrated) |
-| `/api/export-xmp` | POST | Export XMP sidecars only to a destination, preserving folder structure |
-
 ## Prefetch Strategy
 
 The server prefetches images and thumbnails in the background, prioritizing the current
